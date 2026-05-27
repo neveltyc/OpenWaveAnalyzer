@@ -527,7 +527,7 @@ def _add_common(sp):
 
 def main():
     p = argparse.ArgumentParser(
-        prog='wave_analyzer',
+        prog='open_wave_analyzer',
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--json', action='store_true',

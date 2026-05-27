@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unified VCD/FST waveform analyzer for Agent-based RTL debug.
 
-Usage: wave_analyzer [--json] <command> <file> [options]
+Usage: open_wave_analyzer [--json] <command> <file> [options]
 Supported formats: VCD (.vcd), FST (.fst) — auto-detected by extension or magic byte.
 
 Commands:
@@ -5316,7 +5316,7 @@ def _add_common(sp):
 
 def main():
     p = argparse.ArgumentParser(
-        prog='wave_analyzer',
+        prog='open_wave_analyzer',
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--json', action='store_true',
