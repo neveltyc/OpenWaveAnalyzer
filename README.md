@@ -33,30 +33,30 @@ command has a `--json` mode that emits compact, machine-readable output so
 LLM agents can inspect waveforms without a GUI.
 
 ```bash
-python wave_analyzer.py search sim.fst --condition "state=5" --show data,valid --begin 17us
+python open_open_wave_analyzer.py search sim.fst --condition "state=5" --show data,valid --begin 17us
 ```
 
 ## Quick start
 
 ```bash
 # What is in this file?
-python wave_analyzer.py info sim.vcd
-python wave_analyzer.py info sim.fst
+python open_open_wave_analyzer.py info sim.vcd
+python open_open_wave_analyzer.py info sim.fst
 
 # Show me the clock and reset
-python wave_analyzer.py list sim.vcd --filter clk,rst
+python open_open_wave_analyzer.py list sim.vcd --filter clk,rst
 
 # What happened between 100 ns and 200 ns?
-python wave_analyzer.py dump sim.fst --begin 100ns --end 200ns --filter state
+python open_open_wave_analyzer.py dump sim.fst --begin 100ns --end 200ns --filter state
 
 # When was valid=1 AND ready=1 at the same time?
-python wave_analyzer.py search sim.vcd --condition "valid=1,ready=1" --show data
+python open_open_wave_analyzer.py search sim.vcd --condition "valid=1,ready=1" --show data
 
 # Give me a snapshot at exactly 17.55 us
-python wave_analyzer.py snapshot sim.fst --at 17.55us --filter state,init_done
+python open_open_wave_analyzer.py snapshot sim.fst --at 17.55us --filter state,init_done
 
 # Which signals are toggling, which are static?
-python wave_analyzer.py summary sim.vcd --filter dll_*
+python open_open_wave_analyzer.py summary sim.vcd --filter dll_*
 ```
 
 ## Install
@@ -65,10 +65,10 @@ Single file, no dependencies, Python 3.9+.
 
 ```bash
 # Download the release artifact
-curl -fsSL https://raw.githubusercontent.com/neveltyc/OpenWaveAnalyzer/main/wave_analyzer.py -o wave_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/OpenWaveAnalyzer/main/open_wave_analyzer.py -o open_wave_analyzer.py
 
 # Verify
-python wave_analyzer.py --version
+python open_open_wave_analyzer.py --version
 ```
 
 No pip, no venv, no PyPI.  Works anywhere curl and Python 3.9+ are available
@@ -100,7 +100,7 @@ All commands accept `--begin` / `--end` time windows with unit suffixes
 (`fs`, `ps`, `ns`, `us`, `ms`, `s`), `--filter` with substring or glob
 patterns, and `--json` for structured output.
 
-Run `python wave_analyzer.py --help` for the full reference.
+Run `python open_open_wave_analyzer.py --help` for the full reference.
 
 ## Performance
 
@@ -130,15 +130,15 @@ Every command emits compact structured JSON under `--json`.  Agents and scripts
 get raw tick counts (`_ticks`) alongside human-readable times (`_h`).
 
 ```bash
-python wave_analyzer.py --json info sim.fst
-python wave_analyzer.py --json search sim.vcd --condition "state=5" --show data
+python open_open_wave_analyzer.py --json info sim.fst
+python open_open_wave_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
 
 ## Project layout
 
 ```
-wave_analyzer.py          Release artifact (single file, _make.py output)
-_make.py                  Assembler: concatenate modules/ into wave_analyzer.py
+open_wave_analyzer.py          Release artifact (single file, _make.py output)
+_make.py                  Assembler: concatenate modules/ into open_wave_analyzer.py
 modules/                  Source modules (edit here, _make.py builds the release)
   _preamble.py              Shebang, docstring, imports, version
   fst_types.py              Part 1: FST enums and dataclasses
@@ -181,7 +181,7 @@ Check consistency  -> python _make.py --check
 Run tests          -> pytest verify/
 Sync PurePyFstlib  -> diff -> patch modules/fst_reader.py -> python _make.py
 Sync VCD_ANALYZER  -> diff -> patch modules/vcd_parser.py -> python _make.py
-Release            -> publish wave_analyzer.py (single file)
+Release            -> publish open_wave_analyzer.py (single file)
 ```
 
 ## License

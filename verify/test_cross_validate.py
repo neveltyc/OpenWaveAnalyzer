@@ -1,7 +1,7 @@
 """Cross-validate FST vs VCD: identical waveform data should produce identical analysis.
 
 For each waveform pair (VCD + FST from the same simulation), run every
-wave_analyzer command on both files and verify they produce equivalent output.
+open_wave_analyzer command on both files and verify they produce equivalent output.
 """
 
 import json

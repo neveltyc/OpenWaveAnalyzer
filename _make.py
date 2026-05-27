@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Assemble modules/ into a single-file wave_analyzer.py for release.
+"""Assemble modules/ into a single-file open_wave_analyzer.py for release.
 
 Usage:
-    python _make.py          # build wave_analyzer.py
-    python _make.py --check  # verify wave_analyzer.py matches modules/
+    python _make.py          # build open_wave_analyzer.py
+    python _make.py --check  # verify open_wave_analyzer.py matches modules/
 
 The module order matches the Part numbering in the assembled file:
     _preamble.py   shebang, docstring, imports, version
@@ -21,7 +21,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MODULES_DIR = HERE / 'modules'
-OUTPUT = HERE / 'wave_analyzer.py'
+OUTPUT = HERE / 'open_wave_analyzer.py'
 
 # Assembly order — must match the Part sequence.
 # Each file is concatenated as-is (including trailing blank lines that

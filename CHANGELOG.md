@@ -1,12 +1,12 @@
 # Changelog
 
-All notable changes to wave_analyzer.
+All notable changes to open_wave_analyzer.
 
 ## [2.0.0] - 2026-05-28
 
 ### Changed
 
-- Split monolithic wave_analyzer.py into 8 source modules under modules/,
+- Split monolithic open_open_wave_analyzer.py into 8 source modules under modules/,
   assembled by _make.py.  The single-file release artifact is produced by
   running python _make.py; python _make.py --check verifies byte-level
   consistency between modules/ and the assembled output.

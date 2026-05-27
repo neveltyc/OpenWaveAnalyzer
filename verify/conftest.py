@@ -1,4 +1,4 @@
-"""Shared fixtures for wave_analyzer regression tests."""
+"""Shared fixtures for open_wave_analyzer regression tests."""
 
 import json
 import subprocess
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 VERIFY_DIR = Path(__file__).resolve().parent
-SCRIPT = VERIFY_DIR.parent / 'wave_analyzer.py'
+SCRIPT = VERIFY_DIR.parent / 'open_wave_analyzer.py'
 WAVEFORMS_DIR = VERIFY_DIR / 'waveforms'
 
 
@@ -22,7 +22,7 @@ def load_manifest():
 
 
 def run_analyzer(args, timeout=30):
-    """Run wave_analyzer.py with given arguments, return completed process."""
+    """Run open_wave_analyzer.py with given arguments, return completed process."""
     cmd = [sys.executable, '-S', str(SCRIPT)] + [str(a) for a in args]
     return subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout

@@ -41,18 +41,18 @@ Argument formats:
                   VCD event variables count each trigger; t=0 initialization is ignored.
 
 Examples:
-  wave_analyzer info sim.vcd
-  wave_analyzer info design.fst
-  wave_analyzer list sim.vcd --filter tdata,tvalid,tready
-  wave_analyzer dump sim.fst --begin 17.5us --end 17.6us --filter clk,rst,state
-  wave_analyzer summary sim.vcd --filter dll_st,locked
-  wave_analyzer snapshot design.fst --at 17.55us --filter init_done,state
-  wave_analyzer compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
-  wave_analyzer search sim.fst --condition "state=5"
-  wave_analyzer search sim.vcd --condition "arvalid=1,arready=1" --show araddr,arlen,arid
-  wave_analyzer search sim.vcd --changed data_out --condition "valid=0" --show data_out,valid
-  wave_analyzer search sim.fst --condition "valid=x"
-  wave_analyzer --json summary sim.vcd --filter tvalid,tready
+  python open_wave_analyzer.py info sim.vcd
+  python open_wave_analyzer.py info design.fst
+  python open_wave_analyzer.py list sim.vcd --filter tdata,tvalid,tready
+  python open_wave_analyzer.py dump sim.fst --begin 17.5us --end 17.6us --filter clk,rst,state
+  python open_wave_analyzer.py summary sim.vcd --filter dll_st,locked
+  python open_wave_analyzer.py snapshot design.fst --at 17.55us --filter init_done,state
+  python open_wave_analyzer.py compare sim.vcd --at 17.535us,17.56us --filter init_done,link_active,state
+  python open_wave_analyzer.py search sim.fst --condition "state=5"
+  python open_wave_analyzer.py search sim.vcd --condition "arvalid=1,arready=1" --show araddr,arlen,arid
+  python open_wave_analyzer.py search sim.vcd --changed data_out --condition "valid=0" --show data_out,valid
+  python open_wave_analyzer.py search sim.fst --condition "valid=x"
+  python open_wave_analyzer.py --json summary sim.vcd --filter tvalid,tready
 
 Notes:
   Both VCD and FST files go through the same 7 analysis commands with identical
