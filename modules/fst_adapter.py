@@ -1,0 +1,162 @@
+# ================================================================
+# Part 7: FST Parser Adapter
+# ================================================================
+
+
+
+# ==========================================================================
+# FST Parser Adapter
+# ==========================================================================
+
+_FST_VAR_TYPE_NAMES = {
+    0: 'event', 1: 'integer', 2: 'parameter', 3: 'real', 4: 'real',
+    5: 'reg', 6: 'supply0', 7: 'supply1', 8: 'time', 9: 'tri',
+    10: 'triand', 11: 'trior', 12: 'trireg', 13: 'tri0', 14: 'tri1',
+    15: 'wand', 16: 'wire', 17: 'wor', 18: 'port', 19: 'sparray',
+    20: 'realtime', 21: 'string',
+}
+for _sv in range(22, 30):
+    _FST_VAR_TYPE_NAMES.setdefault(_sv, 'wire')
+
+
+class FSTParser:
+    def __init__(self, path):
+        self.path = path
+        self._reader = _FstReader(path)
+        hdr = self._reader.header
+        self.ts_sec = 10 ** hdr.timescale
+        ts_unit = 's'
+        for u, scale in sorted(_UNITS.items(), key=lambda x: -x[1]):
+            if abs(self.ts_sec - scale) < 1e-12:
+                ts_unit = u
+                break
+        self.ts_str = '$timescale 1{} $end'.format(ts_unit)
+        self.date = hdr.date
+        self.version = hdr.version
+        self.comments = list(self._reader.comments)
+        self.signals = {}
+        for ev in self._reader.hierarchy():
+            if isinstance(ev, FstVar):
+                h = ev.handle
+                path = ev.full_name
+                _bm = re.match(r'^(.*) \[(\d+)(?::(\d+))?\]$', path)
+                if _bm:
+                    if _bm.group(3):
+                        path = _bm.group(1) + '[' + _bm.group(2) + ':' + _bm.group(3) + ']'
+                    else:
+                        path = _bm.group(1) + '[' + _bm.group(2) + ']'
+                scope = ''
+                if '.' in path:
+                    scope = path.rsplit('.', 1)[0]
+                vtype_name = _FST_VAR_TYPE_NAMES.get(ev.var_type, 'wire')
+                is_real = ev.var_type in (FstVarType.VCD_REAL, FstVarType.VCD_REAL_PARAMETER,
+                                           FstVarType.VCD_REALTIME, FstVarType.SV_SHORTREAL)
+                vtype = 'real' if is_real else vtype_name
+                if ev.var_type == FstVarType.VCD_REALTIME:
+                    vtype = 'realtime'
+                if h in self.signals:
+                    self.signals[h]['aliases'].append(path)
+                    if scope and scope not in self.signals[h]['scopes']:
+                        self.signals[h]['scopes'].append(scope)
+                else:
+                    width = ev.length if not is_real else 64
+                    if ev.var_type == FstVarType.VCD_EVENT:
+                        width = 1
+                    self.signals[h] = {
+                        'path': path, 'width': width, 'type': vtype,
+                        'aliases': [path], 'scope': scope,
+                        'scopes': [scope] if scope else [],
+                    }
+        self.raw_var_count = sum(1 for ev in self._reader.hierarchy() if isinstance(ev, FstVar))
+        self.raw_type_counts = defaultdict(int)
+        for ev in self._reader.hierarchy():
+            if isinstance(ev, FstVar):
+                self.raw_type_counts[_FST_VAR_TYPE_NAMES.get(ev.var_type, 'wire')] += 1
+
+    def match(self, keywords):
+        if not keywords:
+            return None
+        raw_pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
+        if not raw_pats:
+            return None
+        pats = []
+        for pat in raw_pats:
+            if any(ch in pat for ch in '*?'):
+                pats.append(('glob', _glob_lite_regex(pat)))
+            else:
+                pats.append(('substr', pat))
+        out = set()
+        for sid, info in self.signals.items():
+            for path in info['aliases']:
+                pl = path.lower()
+                for kind, pat in pats:
+                    if (kind == 'glob' and pat.match(pl)) or (kind == 'substr' and pat in pl):
+                        out.add(sid)
+                        break
+        return out
+
+    def iter_events(self, t0=0, t1=None, sids=None):
+        real_types = {FstVarType.VCD_REAL, FstVarType.VCD_REAL_PARAMETER,
+                      FstVarType.VCD_REALTIME, FstVarType.SV_SHORTREAL}
+        for section_idx in range(len(self._reader._vc_sections)):
+            for fst_time, changes in self._reader.iter_time_value_pairs(section_idx):
+                if fst_time < t0:
+                    continue
+                if t1 is not None and fst_time > t1:
+                    return
+                for handle, raw_val in changes:
+                    if sids is not None and handle not in sids:
+                        continue
+                    if handle not in self.signals:
+                        continue
+                    if isinstance(raw_val, memoryview):
+                        raw_val = bytes(raw_val)
+                    var = self._reader._handle_to_var.get(handle)
+                    var_type = var.var_type if var else -1
+                    info = self.signals[handle]
+                    if var_type in real_types and len(raw_val) >= 8:
+                        try:
+                            fmt = '<d' if self._reader.header.double_endian_match else '>d'
+                            dval = struct.unpack(fmt, raw_val[:8])[0]
+                            val_str = '{:.16g}'.format(dval)
+                        except Exception:
+                            val_str = raw_val.decode('utf-8', errors='replace')
+                    elif info.get('type') == 'string' or info['width'] == 0:
+                        val_str = raw_val.decode('utf-8', errors='replace')
+                    elif info['width'] == 1:
+                        val_str = raw_val.decode('ascii', errors='replace')
+                        if val_str not in '01xz':
+                            val_str = 'x'
+                    else:
+                        val_str = raw_val.decode('ascii', errors='replace')
+                        if not all(c in '01xz' for c in val_str):
+                            val_str = ''.join(c if c in '01xz' else 'x' for c in val_str)
+                    yield (fst_time, handle, val_str)
+
+    def scan_time_range(self):
+        return self._reader.header.start_time, self._reader.header.end_time
+
+
+_FST_MAGIC = bytes([FST_BL_HDR])
+
+
+def wave_parser(path):
+    path_lower = str(path).lower()
+    if path_lower.endswith('.fst'):
+        try:
+            return FSTParser(path)
+        except _FstFormatError as e:
+            sys.exit('Error: invalid FST file: {}'.format(e))
+        except Exception as e:
+            sys.exit('Error: cannot open FST file: {}'.format(e))
+    if path_lower.endswith('.vcd'):
+        return VCDParser(path)
+    try:
+        with open(path, 'rb') as f:
+            if f.read(1) == _FST_MAGIC:
+                return FSTParser(path)
+    except Exception:
+        pass
+    return VCDParser(path)
+
+
