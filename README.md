@@ -33,30 +33,30 @@ command has a `--json` mode that emits compact, machine-readable output so
 LLM agents can inspect waveforms without a GUI.
 
 ```bash
-python open_open_wave_analyzer.py search sim.fst --condition "state=5" --show data,valid --begin 17us
+python open_wave_analyzer.py search sim.fst --condition "state=5" --show data,valid --begin 17us
 ```
 
 ## Quick start
 
 ```bash
 # What is in this file?
-python open_open_wave_analyzer.py info sim.vcd
-python open_open_wave_analyzer.py info sim.fst
+python open_wave_analyzer.py info sim.vcd
+python open_wave_analyzer.py info sim.fst
 
 # Show me the clock and reset
-python open_open_wave_analyzer.py list sim.vcd --filter clk,rst
+python open_wave_analyzer.py list sim.vcd --filter clk,rst
 
 # What happened between 100 ns and 200 ns?
-python open_open_wave_analyzer.py dump sim.fst --begin 100ns --end 200ns --filter state
+python open_wave_analyzer.py dump sim.fst --begin 100ns --end 200ns --filter state
 
 # When was valid=1 AND ready=1 at the same time?
-python open_open_wave_analyzer.py search sim.vcd --condition "valid=1,ready=1" --show data
+python open_wave_analyzer.py search sim.vcd --condition "valid=1,ready=1" --show data
 
 # Give me a snapshot at exactly 17.55 us
-python open_open_wave_analyzer.py snapshot sim.fst --at 17.55us --filter state,init_done
+python open_wave_analyzer.py snapshot sim.fst --at 17.55us --filter state,init_done
 
 # Which signals are toggling, which are static?
-python open_open_wave_analyzer.py summary sim.vcd --filter dll_*
+python open_wave_analyzer.py summary sim.vcd --filter dll_*
 ```
 
 ## Install
@@ -68,7 +68,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/OpenWaveAnalyzer/main/open_wave_analyzer.py -o open_wave_analyzer.py
 
 # Verify
-python open_open_wave_analyzer.py --version
+python open_wave_analyzer.py --version
 ```
 
 No pip, no venv, no PyPI.  Works anywhere curl and Python 3.9+ are available
@@ -100,7 +100,7 @@ All commands accept `--begin` / `--end` time windows with unit suffixes
 (`fs`, `ps`, `ns`, `us`, `ms`, `s`), `--filter` with substring or glob
 patterns, and `--json` for structured output.
 
-Run `python open_open_wave_analyzer.py --help` for the full reference.
+Run `python open_wave_analyzer.py --help` for the full reference.
 
 ## Performance
 
@@ -130,8 +130,8 @@ Every command emits compact structured JSON under `--json`.  Agents and scripts
 get raw tick counts (`_ticks`) alongside human-readable times (`_h`).
 
 ```bash
-python open_open_wave_analyzer.py --json info sim.fst
-python open_open_wave_analyzer.py --json search sim.vcd --condition "state=5" --show data
+python open_wave_analyzer.py --json info sim.fst
+python open_wave_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
 
 ## Project layout
