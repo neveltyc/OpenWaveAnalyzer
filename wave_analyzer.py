@@ -445,7 +445,7 @@ def read_varint(buf: bytes | bytearray | memoryview, off: int = 0) -> tuple[int,
     while off < n and (buf[off] & 0x80):
         off += 1
     if off >= n:
-        raise FstFormatError("truncated varint")
+        raise _FstFormatError("truncated varint")
     # off now points to the last byte (which has bit7=0)
     end = off  # last byte index
     off += 1   # skip past
@@ -480,7 +480,7 @@ def read_svarint(buf: bytes | bytearray | memoryview, off: int = 0) -> tuple[int
     n = len(buf)
     while True:
         if pos >= n:
-            raise FstFormatError("truncated signed varint")
+            raise _FstFormatError("truncated signed varint")
         last = buf[pos]
         pos += 1
         value |= (last & 0x7F) << shift
@@ -573,7 +573,7 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
         if literal_len == 15:
             while True:
                 if i >= n:
-                    raise FstFormatError("truncated LZ4 literal length")
+                    raise _FstFormatError("truncated LZ4 literal length")
                 b = src[i]
                 i += 1
                 literal_len += b
@@ -581,7 +581,7 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
                     break
 
         if i + literal_len > n:
-            raise FstFormatError("truncated LZ4 literal payload")
+            raise _FstFormatError("truncated LZ4 literal payload")
         out.extend(src[i:i + literal_len])
         i += literal_len
 
@@ -590,18 +590,18 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
 
         # Match offset
         if i + 2 > n:
-            raise FstFormatError("truncated LZ4 offset")
+            raise _FstFormatError("truncated LZ4 offset")
         offset = src[i] | (src[i + 1] << 8)
         i += 2
         if offset == 0 or offset > len(out):
-            raise FstFormatError(f"invalid LZ4 offset {offset}")
+            raise _FstFormatError(f"invalid LZ4 offset {offset}")
 
         # Match length
         match_len = token & 0x0F
         if match_len == 15:
             while True:
                 if i >= n:
-                    raise FstFormatError("truncated LZ4 match length")
+                    raise _FstFormatError("truncated LZ4 match length")
                 b = src[i]
                 i += 1
                 match_len += b
@@ -615,7 +615,7 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
             out.append(out[start + j])
 
     if expected_len is not None and len(out) != expected_len:
-        raise FstFormatError(
+        raise _FstFormatError(
             f"LZ4 decompressed length mismatch: got {len(out)}, expected {expected_len}"
         )
     return bytes(out)
@@ -653,15 +653,15 @@ def fastlz_decompress(src: bytes, maxout: int) -> bytes:
             ofs = (ctrl & 0x1F) << 8
             if length == 6:
                 if ip >= ip_limit:
-                    raise FstFormatError("truncated FastLZ extended length")
+                    raise _FstFormatError("truncated FastLZ extended length")
                 length += src[ip]
                 ip += 1
             if ip >= ip_limit:
-                raise FstFormatError("truncated FastLZ offset low byte")
+                raise _FstFormatError("truncated FastLZ offset low byte")
             ref = len(out) - ofs - src[ip] - 1
             ip += 1
             if ref < 0:
-                raise FstFormatError(
+                raise _FstFormatError(
                     f"invalid FastLZ back-reference (ref={ref})"
                 )
             if ip < ip_limit:
@@ -675,7 +675,7 @@ def fastlz_decompress(src: bytes, maxout: int) -> bytes:
         else:
             count = ctrl + 1
             if ip + count > ip_limit:
-                raise FstFormatError("truncated FastLZ literal payload")
+                raise _FstFormatError("truncated FastLZ literal payload")
             out.extend(src[ip:ip + count])
             ip += count
             if ip < ip_limit:
@@ -692,7 +692,7 @@ def decompress_zlib(data: bytes, expected_len: int | None = None) -> bytes:
     """Decompress zlib data, optionally checking expected length."""
     result = zlib.decompress(data)
     if expected_len is not None and len(result) != expected_len:
-        raise FstFormatError(
+        raise _FstFormatError(
             f"zlib decompressed length mismatch: got {len(result)}, expected {expected_len}"
         )
     return result
@@ -708,7 +708,7 @@ def decompress_block(data: bytes, pack_type: str,
     elif pack_type == 'F':
         return fastlz_decompress(data, expected_len)
     else:
-        raise FstFormatError(f"unknown FST pack type: {pack_type!r}")
+        raise _FstFormatError(f"unknown FST pack type: {pack_type!r}")
 
 
 
@@ -781,7 +781,7 @@ class _FstReader:
             size = self.path.stat().st_size
             if size == 0:
                 f.close()
-                raise FstFormatError("empty FST file")
+                raise _FstFormatError("empty FST file")
             first = f.read(1)
             f.seek(0)
             if first and first[0] == FST_BL_ZWRAPPER:
@@ -796,7 +796,7 @@ class _FstReader:
         else:
             raw = self.path.read_bytes()
             if not raw:
-                raise FstFormatError("empty FST file")
+                raise _FstFormatError("empty FST file")
             self._data = self._inflate_zwrapper(raw) if raw[0] == FST_BL_ZWRAPPER else raw
             self._owns_data = True
 
@@ -829,7 +829,7 @@ class _FstReader:
     def _inflate_zwrapper(raw: bytes | bytearray | memoryview) -> bytes:
         """Inflate a whole-file ZWRAPPER FST container."""
         if len(raw) < 17:
-            raise FstFormatError("truncated ZWRAPPER")
+            raise _FstFormatError("truncated ZWRAPPER")
         uclen = int.from_bytes(raw[9:17], "big")
         comp = raw[17:]
         try:
@@ -837,7 +837,7 @@ class _FstReader:
         except zlib.error:
             data = zlib.decompress(comp, -15)
         if len(data) != uclen:
-            raise FstFormatError("ZWRAPPER decompressed length mismatch")
+            raise _FstFormatError("ZWRAPPER decompressed length mismatch")
         return data
 
     def close(self) -> None:
@@ -883,11 +883,11 @@ class _FstReader:
             if block_type == FST_BL_SKIP:
                 break
             if off + 9 > n:
-                raise FstFormatError(f"truncated block header at offset {off}")
+                raise _FstFormatError(f"truncated block header at offset {off}")
             section_length = _u64be(view, off + 1)
             end = off + 1 + section_length
             if section_length < 8 or end > n:
-                raise FstFormatError(
+                raise _FstFormatError(
                     f"invalid section length {section_length} at offset {off}"
                 )
             payload = _ByteView(data, off + 9, end)
@@ -898,10 +898,10 @@ class _FstReader:
     def _parse_header(self) -> FstHeader:
         header_blocks = [b for b in self._blocks if b.block_type == FST_BL_HDR]
         if not header_blocks:
-            raise FstFormatError("missing FST header block")
+            raise _FstFormatError("missing FST header block")
         b = header_blocks[0].payload
         if len(b) < 320:
-            raise FstFormatError("truncated FST header payload")
+            raise _FstFormatError("truncated FST header payload")
         off = 0
         start_time = _u64be(b, off); off += 8
         end_time = _u64be(b, off); off += 8
@@ -910,7 +910,7 @@ class _FstReader:
         d_be = struct.unpack(">d", dcheck_raw)[0]
         double_endian_match = abs(d_le - FST_DOUBLE_ENDTEST) < 1e-15
         if not double_endian_match and abs(d_be - FST_DOUBLE_ENDTEST) >= 1e-15:
-            raise FstFormatError("invalid FST endian check double")
+            raise _FstFormatError("invalid FST endian check double")
         memory_used_by_writer = _u64be(b, off); off += 8
         scope_count = _u64be(b, off); off += 8
         var_count = _u64be(b, off); off += 8
@@ -940,13 +940,13 @@ class _FstReader:
     def _parse_geometry(self, block: FstBlock) -> tuple[list[int], list[int]]:
         body = block.payload
         if len(body) < 16:
-            raise FstFormatError("truncated geometry block")
+            raise _FstFormatError("truncated geometry block")
         uclen = _u64be(body, 0)
         maxhandle = _u64be(body, 8)
         comp = body[16:]
         geom = comp if len(comp) == uclen else zlib.decompress(comp)
         if len(geom) != uclen:
-            raise FstFormatError("geometry length mismatch")
+            raise _FstFormatError("geometry length mismatch")
         signal_lens: list[int] = []
         signal_typs: list[int] = []
         off = 0
@@ -975,11 +975,11 @@ class _FstReader:
             if b.block_type in {FST_BL_HIER, FST_BL_HIER_LZ4, FST_BL_HIER_LZ4DUO}
         ]
         if not hier_blocks:
-            raise FstFormatError("missing hierarchy block")
+            raise _FstFormatError("missing hierarchy block")
         block = hier_blocks[0]
         body = block.payload
         if len(body) < 8:
-            raise FstFormatError("truncated hierarchy block")
+            raise _FstFormatError("truncated hierarchy block")
         uclen = _u64be(body, 0)
         comp = body[8:]
         if block.block_type == FST_BL_HIER:
@@ -996,7 +996,7 @@ class _FstReader:
         else:
             raise AssertionError(block.block_type)
         if len(data) != uclen:
-            raise FstFormatError("hierarchy length mismatch")
+            raise _FstFormatError("hierarchy length mismatch")
         return data
 
     def _parse_hierarchy(self, data: bytes) -> list:
@@ -1073,7 +1073,7 @@ class _FstReader:
             off += 1
             if tag == FST_ST_VCD_SCOPE:
                 if off >= n:
-                    raise FstFormatError("truncated scope")
+                    raise _FstFormatError("truncated scope")
                 scope_type = data[off]; off += 1
                 name, off = _read_cstr(data, off)
                 component, off = _read_cstr(data, off)
@@ -1089,7 +1089,7 @@ class _FstReader:
                     cur_scope = ""
             elif tag == FST_ST_GEN_ATTRBEGIN:
                 if off + 2 > n:
-                    raise FstFormatError("truncated attrbegin")
+                    raise _FstFormatError("truncated attrbegin")
                 attr_type = data[off]; subtype = data[off + 1]; off += 2
                 name_raw, off = _read_cstr_raw(data, off)
                 arg, used = read_varint(data, off); off += used
@@ -1156,7 +1156,7 @@ class _FstReader:
             elif tag == 0xFF and off == n:
                 break
             else:
-                raise FstFormatError(
+                raise _FstFormatError(
                     f"unknown hierarchy tag 0x{tag:02x} at offset {off - 1}"
                 )
         return events
@@ -1253,7 +1253,7 @@ class _FstReader:
             payload = block.payload
             off = 0
             if len(payload) < 24:
-                raise FstFormatError("truncated VCDATA header")
+                raise _FstFormatError("truncated VCDATA header")
             sect.beg_time = _u64be(payload, off); off += 8
             sect.end_time = _u64be(payload, off); off += 8
             off += 8
@@ -1272,7 +1272,7 @@ class _FstReader:
             sect.vc_maxhandle, used4 = read_varint64(payload, off); off += used4
             sect.vc_start = off  # position of pack_type byte
             if off >= len(payload):
-                raise FstFormatError("truncated VCDATA before pack type")
+                raise _FstFormatError("truncated VCDATA before pack type")
             sect.pack_type = chr(payload[off])
             off += 1
             sect.times = self._parse_time_table(payload)
@@ -1287,13 +1287,13 @@ class _FstReader:
     def _parse_time_table(self, payload: bytes) -> list[int]:
         n = len(payload)
         if n < 24:
-            raise FstFormatError("truncated VCDATA time section")
+            raise _FstFormatError("truncated VCDATA time section")
         tsec_uclen = _u64be(payload, n - 24)
         tsec_clen = _u64be(payload, n - 16)
         tsec_nitems = _u64be(payload, n - 8)
         tsec_start = n - 24 - tsec_clen
         if tsec_start < 0:
-            raise FstFormatError("invalid VCDATA time section offset")
+            raise _FstFormatError("invalid VCDATA time section offset")
         compressed = payload[tsec_start:tsec_start + tsec_clen]
         if tsec_uclen == tsec_clen:
             ucdata = compressed
@@ -1316,11 +1316,11 @@ class _FstReader:
         tsec_clen = _u64be(payload, n - 16)
         indx_pntr = n - 24 - tsec_clen - 8
         if indx_pntr < 0:
-            raise FstFormatError("invalid chain table position")
+            raise _FstFormatError("invalid chain table position")
         chain_clen = _u64be(payload, indx_pntr)
         indx_pos = indx_pntr - chain_clen
         if indx_pos < 0:
-            raise FstFormatError("invalid chain table offset")
+            raise _FstFormatError("invalid chain table offset")
         chain_data = payload[indx_pos:indx_pos + chain_clen]
         sect.indx_pos = indx_pos
         sect.indx_len = chain_clen
@@ -1596,7 +1596,7 @@ class _FstReader:
         """
         if self.is_real_handle(handle):
             if len(value) < 8:
-                raise FstFormatError(f"real value for handle {handle} is shorter than 8 bytes")
+                raise _FstFormatError(f"real value for handle {handle} is shorter than 8 bytes")
             fmt = "<d" if self.header.double_endian_match else ">d"
             return struct.unpack(fmt, value[:8])[0]
         if self.is_string_handle(handle):
@@ -2323,7 +2323,7 @@ class _FstReader:
             raw_compressed = self._data[start:start + chain_len]
             try:
                 first_val, skiplen = read_varint32(raw_compressed, 0)
-            except FstFormatError:
+            except _FstFormatError:
                 continue
             dest_len = first_val
             if first_val:
@@ -2508,7 +2508,7 @@ def _read_cstr(buf: bytes | bytearray | memoryview, off: int) -> tuple[str, int]
     while end < n and buf[end] != 0:
         end += 1
     if end >= n:
-        raise FstFormatError("unterminated C string")
+        raise _FstFormatError("unterminated C string")
     return bytes(buf[off:end]).decode("utf-8", errors="replace"), end + 1
 
 def _read_cstr_raw(buf: bytes | bytearray | memoryview, off: int) -> tuple[bytes, int]:
@@ -2517,7 +2517,7 @@ def _read_cstr_raw(buf: bytes | bytearray | memoryview, off: int) -> tuple[bytes
     while end < n and buf[end] != 0:
         end += 1
     if end >= n:
-        raise FstFormatError("unterminated C string")
+        raise _FstFormatError("unterminated C string")
     return bytes(buf[off:end]), end + 1
 
 

@@ -4,6 +4,12 @@ All notable changes to wave_analyzer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Rename 41 stray references to FstFormatError that missed the _FstFormatError
+  prefix applied during inlining.  These would raise NameError instead of the
+  intended format error on malformed or truncated FST inputs.
+
 ### Added
 
 - FST waveform reading via inlined PurePyFstlib (v0.4.0) reader core:
