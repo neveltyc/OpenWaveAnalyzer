@@ -3,6 +3,10 @@
 All notable changes to wave_analyzer.
 
 ## [Unreleased]
+- Restore full module docstring with command reference table,
+  argument format descriptions, 12 usage examples (VCD and FST),
+  and format comparison notes.  Had been stripped to a 6-line stub
+  during the build script assembly.
 - Add VCDATA section integrity check: after iterating all time points,
   warn if any signal chain has unconsumed data remaining, which would
   indicate silently dropped value changes due to corruption.
