@@ -2,7 +2,7 @@
 
 All notable changes to wave_analyzer.
 
-## [Unreleased]
+## [2.0.0] - 2026-05-28
 
 ### Changed
 
