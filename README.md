@@ -1,8 +1,9 @@
 <p align="center">
-  <h1 align="center">Wave Analyzer</h1>
+  <h1 align="center">OpenWaveAnalyzer</h1>
   <p align="center">
-    A fast, single-file CLI for inspecting Verilog <b>VCD</b> and <b>FST</b> waveforms &mdash;
-    built for RTL debug, agent workflows, and anyone who wants answers without opening a waveform viewer.
+    A fast, single-file CLI for inspecting <b>VCD</b> and <b>FST</b> waveforms &mdash;
+    no conversion needed.  Built for RTL debug, agent workflows, and anyone
+    who wants answers without opening a waveform viewer.
   </p>
 </p>
 
@@ -15,13 +16,17 @@
 
 ---
 
-## Why Wave Analyzer?
+## Why OpenWaveAnalyzer?
+
+**Open** means it supports both open waveform formats &mdash; VCD and FST &mdash;
+natively, in a single tool.  No `fst2vcd` pre-conversion, no format lock-in.
+Drop in a `.vcd` or `.fst` and the same seven commands just work.
 
 You have a waveform dump from simulation &mdash; `.vcd` from Icarus, `.fst` from
 commercial tools, or both &mdash; and you need to know what happened to
 `state[3:0]` between 17.3 us and 17.6 us.  Opening a waveform viewer means
 waiting for the GUI, clicking through the hierarchy, zooming, squinting at
-values.  This tool gives you the answer in one command, for either format.
+values.  This tool gives you the answer in one command.
 
 It is designed from the ground up for **agent-assisted workflows**: every
 command has a `--json` mode that emits compact, machine-readable output so
@@ -60,7 +65,7 @@ Single file, no dependencies, Python 3.9+.
 
 ```bash
 # Download the release artifact
-curl -fsSL https://raw.githubusercontent.com/neveltyc/open_wave_analyzer/main/wave_analyzer.py -o wave_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/OpenWaveAnalyzer/main/wave_analyzer.py -o wave_analyzer.py
 
 # Verify
 python wave_analyzer.py --version
@@ -77,7 +82,7 @@ No pip, no venv, no PyPI.  Works anywhere curl and Python 3.9+ are available
 | FST (Fast Signal Trace) | `.fst` | Extension or magic byte (`0x00`) |
 
 The same 7 commands work identically on both formats.  FST files are typically
-10&ndash;20&times; smaller; `info` is near-instant on FST (header-only read).
+10&ndash;20&times; smaller than equivalent VCD files.
 
 ## Commands
 
@@ -96,6 +101,28 @@ All commands accept `--begin` / `--end` time windows with unit suffixes
 patterns, and `--json` for structured output.
 
 Run `python wave_analyzer.py --help` for the full reference.
+
+## Performance
+
+Measured on a 12 MB VCD waveform and its FST equivalent (0.87 MB, 14&times;
+smaller).  All tests run with a single-core Python 3.14 on Windows x64, no
+warmup.
+
+| Command | VCD (12 MB) | FST (0.87 MB) | Ratio |
+|:--------|------------:|--------------:|:------|
+| `info` | 1.63 s | 0.20 s | FST 8&times; faster |
+| `summary` | 3.16 s | 4.80 s | FST 1.5&times; slower |
+| `dump` | 8.48 s | 10.60 s | FST 1.25&times; slower |
+
+`info` is near-instant on FST because the header does not require scanning the
+value-change data.  `dump` and `summary` are slower on FST because the
+pure-Python LZ4/FastLZ decompression path is not as fast as reading plain-text
+VCD tokens.  The trade-off: **FST files are 14&times; smaller, at the cost of
+~25% more parse time for full-scan commands.**
+
+Future work (mmap-backed reading, optional C-extension decompression) can close
+this gap.  For interactive use, the time difference is rarely the bottleneck
+compared to opening a GUI viewer.
 
 ## JSON output
 
@@ -135,9 +162,10 @@ python verify/gen_waveforms.py
 python -m pytest verify/ -v
 ```
 
-The test suite compiles 19 Verilog designs (custom + PurePyFstlib fixtures +
-VCD_ANALYZER fixtures), simulates them with iverilog/vvp, converts to FST via
-vcd2fst, then runs every command on both formats and compares the JSON output.
+The test suite compiles 19 Verilog/SystemVerilog designs (custom + PurePyFstlib
+fixtures + VCD_ANALYZER fixtures), simulates them with iverilog/vvp, converts
+to FST via vcd2fst, then runs every command on both formats and compares the
+JSON output.
 
 **145 passed, 7 skipped, 0 failed.**  The 7 skipped are designs with zero time
 range or no 1-bit signals, which are design limitations, not bugs.
