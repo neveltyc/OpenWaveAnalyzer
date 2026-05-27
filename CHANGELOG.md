@@ -3,6 +3,9 @@
 All notable changes to wave_analyzer.
 
 ## [Unreleased]
+- Add VCDATA section integrity check: after iterating all time points,
+  warn if any signal chain has unconsumed data remaining, which would
+  indicate silently dropped value changes due to corruption.
 
 ### Fixed
 

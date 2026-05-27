@@ -10,7 +10,7 @@ __version__ = '2.0.0'
 
 import sys, os, re, math, json, struct
 import zlib as _zlib
-import bisect, mmap, argparse, base64, fnmatch, heapq
+import bisect, mmap, argparse, base64, fnmatch, heapq, warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -2430,6 +2430,22 @@ class _FstReader:
                 changes.append((idx + 1, val))
             if changes and (not respect_blackout or self.is_dump_active_at(times[ti])):
                 yield (times[ti], changes)
+
+        # -- Integrity check: every signal chain should be fully consumed --
+        unconsumed = []
+        for idx in range(max_handle):
+            rem = length_remaining[idx]
+            if rem > 0:
+                unconsumed.append((idx + 1, rem))  # handle is 1-based
+        if unconsumed:
+            total_bytes = sum(r for _, r in unconsumed)
+            warnings.warn(
+                'FST section {} integrity: {} of {} signal chain(s) had '
+                'unconsumed data ({} bytes remaining); some value changes '
+                'may be missing due to data corruption'.format(
+                    section_index, len(unconsumed), max_handle, total_bytes),
+                stacklevel=2,
+            )
 
     def iter_time_value_pairs_all(self, *, respect_blackout: bool = False) -> Iterator[tuple[int, list[tuple[int, bytes]]]]:
         """Yield time/value batches from all VCDATA sections in file order."""
