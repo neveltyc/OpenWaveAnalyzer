@@ -1,0 +1,39 @@
+# Waveform test artifacts
+*.vcd
+*.fst
+
+# Private files
+AGENTS.md
+
+# Source directories
+VCD_ANALYZER/
+PurePyFstlib/
+
+# Development
+todo/
+
+# Test artifacts (generated)
+verify/build/
+verify/waveforms/
+verify/__pycache__/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test outputs
+*.log
+test_output/
+
