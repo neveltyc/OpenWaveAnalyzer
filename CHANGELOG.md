@@ -27,6 +27,11 @@ All notable changes to open_wave_analyzer.
   search) improve from ~38s to ~26s on large FST, slightly faster than
   the original eager parsing.  Filtered commands still regress vs pure
   lazy because the batch heuristic continues to trigger unnecessarily.
+- Gate batch pre-parse on `sids is None` so only unfiltered full-scan
+  commands trigger bulk+parallel parsing.  Filtered dumps that need
+  single-handle data avoid parsing all chain tables, restoring 5-8s
+  performance.  With this gate: summary/search/dump --limit 0 ~23-27s
+  (-14-19% vs original eager), filtered dumps ~5-8s (-68-77%).
 
 ## [2.0.1] - 2026-05-28
 

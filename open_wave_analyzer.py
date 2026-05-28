@@ -4921,9 +4921,10 @@ class FSTParser:
                 last_needed -= 1
         needed = last_needed - first_needed + 1
 
-        # Bulk-parse when most sections will be touched.
-        # Avoids per-section _ensure_section_parsed overhead inside generators.
-        if needed > 1 and needed >= len(sections) // 2:
+        # Bulk-parse only for unfiltered paths (summary, search, dump --limit 0).
+        # Filtered paths use iter_value_changes per handle — far cheaper than
+        # decoding all 223K chain entries, so lazy per-section parse wins.
+        if needed > 1 and sids is None:
             self._reader._ensure_all_sections_parsed()
 
         for section_idx in range(first_needed, last_needed + 1):
