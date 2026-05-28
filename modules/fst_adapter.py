@@ -131,7 +131,7 @@ class FSTParser:
                 val_str = ''.join(c if c in '01xz' else 'x' for c in val_str)
             return val_str
 
-    def iter_events(self, t0=0, t1=None, sids=None):
+    def iter_events(self, t0=0, t1=None, sids=None, *, bulk_parse=True):
         sections = self._reader._vc_sections
         if not sections:
             return
@@ -146,10 +146,13 @@ class FSTParser:
                 last_needed -= 1
         needed = last_needed - first_needed + 1
 
-        # Bulk-parse only for unfiltered paths (summary, search, dump --limit 0).
-        # Filtered paths use iter_value_changes per handle — far cheaper than
-        # decoding all 223K chain entries, so lazy per-section parse wins.
-        if needed > 1 and sids is None:
+        # Bulk-parse all sections up front only when the caller will consume the
+        # whole stream (summary, search, dump --limit 0): it parallelizes chain
+        # decoding across cores. For a bounded consumer (dump --limit N) it is
+        # pure waste — the early break means later sections are never read — so
+        # bulk_parse=False lets iter_time_value_pairs lazily parse section-by-
+        # section and stop after the first few. Filtered paths never bulk-parse.
+        if needed > 1 and sids is None and bulk_parse:
             self._reader._ensure_all_sections_parsed()
 
         for section_idx in range(first_needed, last_needed + 1):

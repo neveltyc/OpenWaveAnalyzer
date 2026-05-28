@@ -469,7 +469,7 @@ class VCDParser:
 
         return None
 
-    def iter_events(self, t0=0, t1=None, sids=None):
+    def iter_events(self, t0=0, t1=None, sids=None, *, bulk_parse=True):
         """Yield (time, sig_id, value_str) with bit reassembly.
 
         Token-based, context-sensitive. Section keywords ($comment/$vcdclose/

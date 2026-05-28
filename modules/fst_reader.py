@@ -2013,15 +2013,11 @@ def _parse_section_worker(section_index):
     sect = reader._vc_sections[section_index]
     payload = sect._payload
 
-    # _parse_time_table uses self._time_to_index (dead write, never read).
-    # Provide a dummy self with a writable attribute.
-    class _Ctx:
-        _time_to_index = None
-    ctx = _Ctx()
-    times = _FstReader._parse_time_table(ctx, payload)
-
-    # _parse_chain_table does not use self at all.
-    _FstReader._parse_chain_table(None, sect, payload)
+    # Bind both helpers to the real reader inherited via fork. (Writes like
+    # reader._time_to_index land in the child's copy and never reach the parent,
+    # which is fine — the parent only consumes the returned tuple.)
+    times = reader._parse_time_table(payload)
+    reader._parse_chain_table(sect, payload)
     return (times, sect.chain_table, sect.chain_table_lengths)
 
 

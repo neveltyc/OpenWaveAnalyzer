@@ -106,7 +106,10 @@ def cmd_dump(vcd, args):
     total = 0
     truncated = False
     events = []
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
+    # A finite limit stops the stream early; tell the reader not to eagerly
+    # parse every section (only the first few are ever consumed). limit==0
+    # (unlimited) reads everything, so eager parallel parse still wins.
+    for t, sid, val in vcd.iter_events(t0, t1, sids, bulk_parse=(limit == 0)):
         total += 1
         if limit != 0 and len(events) >= limit:
             truncated = True

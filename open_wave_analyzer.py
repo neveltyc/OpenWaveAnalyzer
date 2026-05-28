@@ -2786,15 +2786,11 @@ def _parse_section_worker(section_index):
     sect = reader._vc_sections[section_index]
     payload = sect._payload
 
-    # _parse_time_table uses self._time_to_index (dead write, never read).
-    # Provide a dummy self with a writable attribute.
-    class _Ctx:
-        _time_to_index = None
-    ctx = _Ctx()
-    times = _FstReader._parse_time_table(ctx, payload)
-
-    # _parse_chain_table does not use self at all.
-    _FstReader._parse_chain_table(None, sect, payload)
+    # Bind both helpers to the real reader inherited via fork. (Writes like
+    # reader._time_to_index land in the child's copy and never reach the parent,
+    # which is fine — the parent only consumes the returned tuple.)
+    times = reader._parse_time_table(payload)
+    reader._parse_chain_table(sect, payload)
     return (times, sect.chain_table, sect.chain_table_lengths)
 
 
@@ -4124,7 +4120,7 @@ class VCDParser:
 
         return None
 
-    def iter_events(self, t0=0, t1=None, sids=None):
+    def iter_events(self, t0=0, t1=None, sids=None, *, bulk_parse=True):
         """Yield (time, sig_id, value_str) with bit reassembly.
 
         Token-based, context-sensitive. Section keywords ($comment/$vcdclose/
@@ -5087,7 +5083,7 @@ class FSTParser:
                 val_str = ''.join(c if c in '01xz' else 'x' for c in val_str)
             return val_str
 
-    def iter_events(self, t0=0, t1=None, sids=None):
+    def iter_events(self, t0=0, t1=None, sids=None, *, bulk_parse=True):
         sections = self._reader._vc_sections
         if not sections:
             return
@@ -5102,10 +5098,13 @@ class FSTParser:
                 last_needed -= 1
         needed = last_needed - first_needed + 1
 
-        # Bulk-parse only for unfiltered paths (summary, search, dump --limit 0).
-        # Filtered paths use iter_value_changes per handle — far cheaper than
-        # decoding all 223K chain entries, so lazy per-section parse wins.
-        if needed > 1 and sids is None:
+        # Bulk-parse all sections up front only when the caller will consume the
+        # whole stream (summary, search, dump --limit 0): it parallelizes chain
+        # decoding across cores. For a bounded consumer (dump --limit N) it is
+        # pure waste — the early break means later sections are never read — so
+        # bulk_parse=False lets iter_time_value_pairs lazily parse section-by-
+        # section and stop after the first few. Filtered paths never bulk-parse.
+        if needed > 1 and sids is None and bulk_parse:
             self._reader._ensure_all_sections_parsed()
 
         for section_idx in range(first_needed, last_needed + 1):
@@ -5331,7 +5330,10 @@ def cmd_dump(vcd, args):
     total = 0
     truncated = False
     events = []
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
+    # A finite limit stops the stream early; tell the reader not to eagerly
+    # parse every section (only the first few are ever consumed). limit==0
+    # (unlimited) reads everything, so eager parallel parse still wins.
+    for t, sid, val in vcd.iter_events(t0, t1, sids, bulk_parse=(limit == 0)):
         total += 1
         if limit != 0 and len(events) >= limit:
             truncated = True
