@@ -580,10 +580,149 @@ class _FstReader:
         payload = sect._payload
         if payload is None:
             raise _FstFormatError("section payload not available for lazy parse")
-        sect.times = self._parse_time_table(payload)
+        if sect.times is None:
+            sect.times = self._parse_time_table(payload)
         self._parse_chain_table(sect, payload)
         sect._payload = None
         sect._parsed = True
+
+    def _ensure_time_table_parsed(self, section_index: int) -> None:
+        """Parse only the time table for a section (cheap, ~0.01s).
+
+        Used by the filtered path which doesn't need the full chain table.
+        Leaves _payload intact so a later full parse can still run.
+        """
+        sect = self._vc_sections[section_index]
+        if sect.times is not None:
+            return
+        payload = sect._payload
+        if payload is None:
+            if sect._parsed:
+                return  # already fully parsed, times should be set
+            raise _FstFormatError("section payload not available for time table parse")
+        sect.times = self._parse_time_table(payload)
+
+    def _scan_chain_entries(self, section_index: int, handle_indices) -> dict:
+        """Scan chain table for specific handles only.
+
+        Returns {handle_index_0based: (chain_off, chain_len)}.
+        Stops scanning after the last needed handle — much faster than
+        full _parse_chain_table when handles are clustered in the low range.
+        Avoids the [0]*223K array allocation entirely.
+        """
+        sect = self._vc_sections[section_index]
+        if sect._parsed:
+            result = {}
+            for h in handle_indices:
+                idx = h - 1
+                if 0 <= idx < len(sect.chain_table):
+                    result[h] = (sect.chain_table[idx], sect.chain_table_lengths[idx])
+            return result
+
+        payload = sect._payload
+        if payload is None:
+            return {}
+
+        needed_0 = frozenset(h - 1 for h in handle_indices)
+        max_needed = max(needed_0) if needed_0 else -1
+
+        n = len(payload)
+        tsec_clen = _u64be(payload, n - 16)
+        indx_pntr = n - 24 - tsec_clen - 8
+        if indx_pntr < 0:
+            return {}
+        chain_clen = _u64be(payload, indx_pntr)
+        indx_pos = indx_pntr - chain_clen
+        if indx_pos < 0:
+            return {}
+        chain_data = payload[indx_pos:indx_pos + chain_clen]
+
+        # Sparse collection: only record entries for needed handles.
+        # collected[idx] = (chain_off, raw_length_or_alias)
+        collected = {}
+        pnt = 0; idx = 0; pval = 0; pidx = -1
+
+        if sect.block_type == FST_BL_VCDATA_DYN_ALIAS2:
+            prev_alias = 0
+            while pnt < chain_clen and idx <= max_needed + 1:
+                if chain_data[pnt] & 0x01:
+                    shval, skiplen = read_svarint64(chain_data, pnt)
+                    shval >>= 1
+                    if shval > 0:
+                        pval += shval
+                        if idx in needed_0:
+                            collected[idx] = (pval, None)  # length resolved below
+                        if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
+                            collected[pidx] = (collected[pidx][0], pval - collected[pidx][0])
+                        pidx = idx
+                        idx += 1
+                    elif shval < 0:
+                        if idx in needed_0:
+                            collected[idx] = (0, shval)
+                        prev_alias = shval
+                        idx += 1
+                    else:
+                        if idx in needed_0:
+                            collected[idx] = (0, prev_alias)
+                        idx += 1
+                else:
+                    val, skiplen = read_varint32(chain_data, pnt)
+                    loopcnt = val >> 1
+                    skip_end = idx + loopcnt
+                    idx = skip_end  # fast skip — all zero entries
+                pnt += skiplen
+
+            # Sentinel: resolve pending pidx length
+            if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
+                sentinel_off = indx_pos - sect.vc_start
+                collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
+        else:
+            while pnt < chain_clen and idx <= max_needed + 1:
+                val, skiplen = read_varint32(chain_data, pnt)
+                if not val:
+                    pnt += skiplen
+                    val2, skiplen = read_varint32(chain_data, pnt)
+                    if idx in needed_0:
+                        collected[idx] = (0, -val2)
+                    idx += 1
+                elif val & 1:
+                    pval += (val >> 1)
+                    if idx in needed_0:
+                        collected[idx] = (pval, None)
+                    if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
+                        collected[pidx] = (collected[pidx][0], pval - collected[pidx][0])
+                    pidx = idx
+                    idx += 1
+                else:
+                    loopcnt = val >> 1
+                    idx += loopcnt
+                pnt += skiplen
+
+            if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
+                sentinel_off = indx_pos - sect.vc_start
+                collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
+
+        # Alias resolution for collected entries
+        for cidx in list(collected):
+            off, length = collected[cidx]
+            if length is not None and length < 0 and off == 0:
+                src = (-length) - 1
+                if src in collected:
+                    collected[cidx] = collected[src]
+                elif sect._parsed and src < len(sect.chain_table):
+                    collected[cidx] = (sect.chain_table[src], sect.chain_table_lengths[src])
+                else:
+                    collected[cidx] = (0, 0)
+
+        # Convert to handle-based dict (1-based)
+        result = {}
+        for h in handle_indices:
+            idx = h - 1
+            if idx in collected:
+                off, length = collected[idx]
+                if off is not None and length is not None and off > 0 and length > 0:
+                    result[h] = (off, length)
+        return result
 
     def _ensure_all_sections_parsed(self) -> None:
         """Bulk-parse all unparsed sections.
@@ -1534,22 +1673,31 @@ class _FstReader:
     def iter_value_changes(
         self, handle: int, section_index: int = 0, *, respect_blackout: bool = False,
         _include_section_initial: bool = True,
+        _chain_entry: tuple = None,
     ) -> Iterator[tuple[int, bytes]]:
         if section_index >= len(self._vc_sections):
             return
-        self._ensure_section_parsed(section_index)
         sect = self._vc_sections[section_index]
         idx = handle - 1
 
-        if idx >= len(sect.chain_table) or idx >= len(sect.chain_table_lengths):
-            if _include_section_initial:
-                initial = self.get_initial_value(handle, section_index)
-                if not respect_blackout or self.is_dump_active_at(sect.beg_time):
-                    yield (sect.beg_time, initial)
-            return
+        if _chain_entry is not None:
+            # Filtered fast path: chain entry pre-computed by _scan_chain_entries,
+            # only time table needed (no full chain table parse).
+            self._ensure_time_table_parsed(section_index)
+            chain_off, chain_len = _chain_entry
+        else:
+            # Full path: parse entire section (chain table + time table).
+            self._ensure_section_parsed(section_index)
 
-        chain_off = sect.chain_table[idx]
-        chain_len = sect.chain_table_lengths[idx]
+            if idx >= len(sect.chain_table) or idx >= len(sect.chain_table_lengths):
+                if _include_section_initial:
+                    initial = self.get_initial_value(handle, section_index)
+                    if not respect_blackout or self.is_dump_active_at(sect.beg_time):
+                        yield (sect.beg_time, initial)
+                return
+
+            chain_off = sect.chain_table[idx]
+            chain_len = sect.chain_table_lengths[idx]
 
         # Negative chain_len: dynamic alias, return only the initial value
         if chain_len < 0:

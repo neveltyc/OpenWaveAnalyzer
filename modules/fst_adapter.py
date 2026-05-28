@@ -161,14 +161,31 @@ class FSTParser:
                     section_idx, t0, t1)
 
     def _iter_events_filtered(self, section_idx, t0, t1, sids):
-        """Selective path: decompress only the requested handles."""
+        """Selective path: decompress only the requested handles.
+
+        Uses _scan_chain_entries for targeted chain lookup — avoids parsing
+        the full 223K-entry chain table when only a few handles are needed.
+        """
+        sect = self._reader._vc_sections[section_idx]
+        valid_handles = [h for h in sids if h in self.signals]
+        if not valid_handles:
+            return
+
+        # Targeted chain lookup: scan chain stream only up to max(handles),
+        # returning entries for requested handles only.
+        chain_entries = self._reader._scan_chain_entries(section_idx, valid_handles)
+
         # Build per-handle iterators and merge in time order.
-        # Each entry in the heap: (time, sequence_counter, handle, value_bytes)
         iterators = []
-        for handle in sids:
-            if handle not in self.signals:
-                continue
-            it = self._reader.iter_value_changes(handle, section_idx)
+        for handle in valid_handles:
+            entry = chain_entries.get(handle)
+            if entry is not None:
+                it = self._reader.iter_value_changes(
+                    handle, section_idx, _chain_entry=entry)
+            else:
+                # No chain data — emit initial value only
+                initial = self._reader.get_initial_value(handle, section_idx)
+                it = iter([(sect.beg_time, initial)])
             iterators.append((it, handle))
 
         heap = []
@@ -186,7 +203,6 @@ class FSTParser:
                 return
             if fst_time >= t0:
                 yield (fst_time, handle, self._format_raw_value(handle, raw_val))
-            # Advance this handle's iterator
             val = next(it, None)
             if val is not None:
                 next_time, next_raw = val
