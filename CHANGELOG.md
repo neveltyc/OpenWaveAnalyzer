@@ -2,6 +2,15 @@
 
 All notable changes to open_wave_analyzer.
 
+## [Unreleased]
+
+### Changed
+
+- Speed up filtered VCD scans by skipping unselected scalar, vector, and real
+  value-change tokens before full value parsing.
+- Align VCD tokenization with upstream VCD_ANALYZER by using Python's standard
+  whitespace splitting in the VCD parser.
+
 ## [2.0.0] - 2026-05-28
 
 ### Changed

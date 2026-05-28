@@ -54,7 +54,7 @@ class VCDParser:
                 line = f.readline()
                 if not line:
                     break
-                for tok in _vcd_split(line):
+                for tok in line.split():
                     if done:
                         # Buffer tokens that share the same line as
                         # `$enddefinitions $end`. These are data tokens
@@ -374,7 +374,7 @@ class VCDParser:
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             f.seek(self._data_offset)
             for line in f:
-                for t in _vcd_split(line):
+                for t in line.split():
                     yield t
 
     def _is_structural_token(self, tok):
@@ -562,6 +562,26 @@ class VCDParser:
                     if t1 is not None and cur_t > t1:
                         return
                     continue
+
+                # Fast path for filtered scans: discard unselected value
+                # changes before running the full parser. Single-bit changes
+                # carry the identifier in this token; vector/real changes
+                # carry it in the next token, which we put back only when the
+                # selected query still needs the value.
+                if sids is not None:
+                    c = tok[0]
+                    if c in '01xzXZ' and len(tok) >= 2:
+                        sym = tok[1:]
+                        if sym not in sids and sym not in bit_map:
+                            continue
+                    elif c in 'bBrR':
+                        sym_tok = _next()
+                        if sym_tok is not None and not self._is_structural_token(sym_tok):
+                            if sym_tok not in sids and sym_tok not in bit_map:
+                                continue
+                            pushback.append(sym_tok)
+                        elif sym_tok is not None:
+                            pushback.append(sym_tok)
     
                 # Shared value_change parser. Keeping b/r/p validation in one
                 # helper prevents scan_time_range() and iter_events() from
@@ -638,7 +658,7 @@ class VCDParser:
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             f.seek(self._data_offset)
             for line in f:
-                for tok in _vcd_split(line):
+                for tok in line.split():
                     if tok == '$end' or tok in _SIM_KEYWORDS:
                         if tok == '$dumpvars':
                             saw_initial_data = True
@@ -1248,6 +1268,4 @@ def _public_row(row, verbose=False):
         r['width'] = width
         r['type'] = typ
     return r
-
-
 

@@ -448,20 +448,3 @@ _SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars',
 # header and data; $vcdclose (18.3.6.1) wraps a final simulation time token.
 _DATA_SKIP_SECTIONS = {'$comment', '$vcdclose'}
 
-
-
-# VCD tokenizer: split only on space/tab/CR/LF.  Python's str.split()
-# treats form-feed (\x0c), vertical-tab (\x0b), and other Unicode
-# whitespace as delimiters too, which silently eats control characters
-# that may appear inside signal names (e.g. escaped identifiers where
-# \f was interpreted as 0x0c).  GTKWave's vcd2fst only splits on
-# space/tab/newline, so we match that behaviour for cross-format
-# consistency.
-_VCD_TOKEN_RE = re.compile(r'[ \t\r\n]+')
-
-
-def _vcd_split(line: str) -> list[str]:
-    """Split a VCD line into tokens on space/tab/newline only."""
-    return [t for t in _VCD_TOKEN_RE.split(line) if t]
-
-
