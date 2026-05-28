@@ -1505,6 +1505,8 @@ class _FstReader:
         if comp_size:
             # Compressed data follows
             comp_body = vc_data[cskip:cskip + chain_len]
+            if not comp_body:
+                return
             vc_data = decompress_block(comp_body, sect.pack_type, comp_size)
         else:
             # Uncompressed: skip the marker

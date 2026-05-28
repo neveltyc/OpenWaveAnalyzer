@@ -135,7 +135,6 @@ class FSTParser:
         """Selective path: decompress only the requested handles."""
         # Build per-handle iterators and merge in time order.
         # Each entry in the heap: (time, sequence_counter, handle, value_bytes)
-        import heapq
         iterators = []
         for handle in sids:
             if handle not in self.signals:
