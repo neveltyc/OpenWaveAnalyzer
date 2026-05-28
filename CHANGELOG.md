@@ -2,6 +2,14 @@
 
 All notable changes to open_wave_analyzer.
 
+
+## [Unreleased]
+
+### Changed
+
+- Optimize _summary_rows baseline phase: defer full stats dict creation to
+  first analysis-window event, using cheap baseline dict during preamble.
+
 ## [2.0.1] - 2026-05-28
 
 ### Changed
