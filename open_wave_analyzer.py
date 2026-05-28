@@ -1359,20 +1359,50 @@ class _FstReader:
         sect._parsed = True
 
     def _ensure_all_sections_parsed(self) -> None:
-        """Bulk-parse all unparsed sections in a tight loop.
+        """Bulk-parse all unparsed sections.
 
         Full-scan commands (summary, search, dump --limit 0) need every
-        section.  Parsing them here avoids 47× function-call overhead from
-        per-section _ensure_section_parsed inside generator frames.
+        section.  When ≥4 sections are unparsed, uses multiprocessing to
+        parallelize across CPU cores (varint decoding is CPU-bound).
+        Falls back to sequential on any error (Windows/spawn, pickling, etc).
         """
-        for sect in self._vc_sections:
+        unparsed = [(i, s) for i, s in enumerate(self._vc_sections)
+                    if not s._parsed and s._payload is not None]
+        if not unparsed:
+            return
+        import os
+        if len(unparsed) >= 4 and (os.cpu_count() or 1) >= 2:
+            try:
+                self._parallel_parse_sections(unparsed)
+                return
+            except Exception:
+                pass  # fall back to sequential
+        for i, sect in unparsed:
             if sect._parsed:
                 continue
-            payload = sect._payload
-            if payload is None:
-                continue
-            sect.times = self._parse_time_table(payload)
-            self._parse_chain_table(sect, payload)
+            self._ensure_section_parsed(i)
+
+    def _parallel_parse_sections(self, unparsed) -> None:
+        """Parse multiple sections in parallel using fork-based workers."""
+        import os
+        from concurrent.futures import ProcessPoolExecutor
+
+        global _g_fst_reader
+        _g_fst_reader = self
+
+        n_workers = min(len(unparsed), os.cpu_count() or 4, 4)
+        indices = [i for i, _ in unparsed]
+
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                results = list(pool.map(_parse_section_worker, indices))
+        finally:
+            _g_fst_reader = None
+
+        for (idx, sect), (times, ct, ctl) in zip(unparsed, results):
+            sect.times = times
+            sect.chain_table = ct
+            sect.chain_table_lengths = ctl
             sect._payload = None
             sect._parsed = True
 
@@ -2555,6 +2585,36 @@ class _FstReader:
         """Yield time/value batches from all VCDATA sections in file order."""
         for idx in range(len(self._vc_sections)):
             yield from self.iter_time_value_pairs(idx, respect_blackout=respect_blackout)
+
+
+# -- Parallel section parsing support ----------------------------------------
+# Worker function for ProcessPoolExecutor. Must be module-level for pickling.
+# On Linux (fork start method), workers inherit the parent's mmap and module
+# globals, so _g_fst_reader is accessible without serialization.
+_g_fst_reader = None
+
+
+def _parse_section_worker(section_index):
+    """Parse time_table + chain_table for one VCDATA section.
+
+    Called in a forked worker process.  Accesses the shared _FstReader
+    instance via the module global _g_fst_reader (inherited from parent
+    through fork).
+    """
+    reader = _g_fst_reader
+    sect = reader._vc_sections[section_index]
+    payload = sect._payload
+
+    # _parse_time_table uses self._time_to_index (dead write, never read).
+    # Provide a dummy self with a writable attribute.
+    class _Ctx:
+        _time_to_index = None
+    ctx = _Ctx()
+    times = _FstReader._parse_time_table(ctx, payload)
+
+    # _parse_chain_table does not use self at all.
+    _FstReader._parse_chain_table(None, sect, payload)
+    return (times, sect.chain_table, sect.chain_table_lengths)
 
 
 class _ByteView:

@@ -20,6 +20,13 @@ All notable changes to open_wave_analyzer.
   needed >= sections//2 heuristic; full-scan commands see modest improvement
   but filtered commands regress when the heuristic triggers unnecessarily.
   Time-window commands (snapshot, compare, --begin/--end) are unaffected.
+- Multi-process parallel section parsing in _ensure_all_sections_parsed:
+  when >=4 sections need parsing, distributes across ProcessPoolExecutor
+  (max 4 workers).  On Linux, workers inherit parent mmap via fork; on
+  Windows the sequential fallback applies.  Full-scan commands (summary,
+  search) improve from ~38s to ~26s on large FST, slightly faster than
+  the original eager parsing.  Filtered commands still regress vs pure
+  lazy because the batch heuristic continues to trigger unnecessarily.
 
 ## [2.0.1] - 2026-05-28
 
