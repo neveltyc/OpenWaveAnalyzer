@@ -15,6 +15,11 @@ All notable changes to open_wave_analyzer.
   FSTParser.iter_events to avoid sections outside [t0, t1].  Large FST
   header-only commands drop from ~24s to ~6s (-74%); time-range queries
   (snapshot, compare, --begin/--end) drop ~78-80%.
+- Add batch pre-parse for full-scan paths in lazy VCDATA to avoid per-section
+  _ensure_section_parsed overhead inside generator frames.  Uses a
+  needed >= sections//2 heuristic; full-scan commands see modest improvement
+  but filtered commands regress when the heuristic triggers unnecessarily.
+  Time-window commands (snapshot, compare, --begin/--end) are unaffected.
 
 ## [2.0.1] - 2026-05-28
 

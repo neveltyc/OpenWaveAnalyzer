@@ -133,15 +133,25 @@ class FSTParser:
 
     def iter_events(self, t0=0, t1=None, sids=None):
         sections = self._reader._vc_sections
-        for section_idx in range(len(sections)):
-            sect = sections[section_idx]
-            # Skip sections entirely outside the query time window.
-            # Combined with lazy parsing, skipped sections never get their
-            # time_table/chain_table decoded — O(0) instead of O(223K).
-            if sect.end_time < t0:
-                continue
-            if t1 is not None and sect.beg_time > t1:
-                break
+        if not sections:
+            return
+
+        # Determine which sections overlap the query window.
+        first_needed = 0
+        last_needed = len(sections) - 1
+        while first_needed < len(sections) and sections[first_needed].end_time < t0:
+            first_needed += 1
+        if t1 is not None:
+            while last_needed >= first_needed and sections[last_needed].beg_time > t1:
+                last_needed -= 1
+        needed = last_needed - first_needed + 1
+
+        # Bulk-parse when most sections will be touched.
+        # Avoids per-section _ensure_section_parsed overhead inside generators.
+        if needed > 1 and needed >= len(sections) // 2:
+            self._reader._ensure_all_sections_parsed()
+
+        for section_idx in range(first_needed, last_needed + 1):
             if sids is not None:
                 yield from self._iter_events_filtered(
                     section_idx, t0, t1, sids)

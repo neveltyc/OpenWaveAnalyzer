@@ -585,6 +585,24 @@ class _FstReader:
         sect._payload = None
         sect._parsed = True
 
+    def _ensure_all_sections_parsed(self) -> None:
+        """Bulk-parse all unparsed sections in a tight loop.
+
+        Full-scan commands (summary, search, dump --limit 0) need every
+        section.  Parsing them here avoids 47× function-call overhead from
+        per-section _ensure_section_parsed inside generator frames.
+        """
+        for sect in self._vc_sections:
+            if sect._parsed:
+                continue
+            payload = sect._payload
+            if payload is None:
+                continue
+            sect.times = self._parse_time_table(payload)
+            self._parse_chain_table(sect, payload)
+            sect._payload = None
+            sect._parsed = True
+
     def _build_section_time_index(self) -> None:
         """Build section begin/end arrays for time-window queries."""
         self._section_beg_times: list[int] = [int(s.beg_time) for s in self._vc_sections]
