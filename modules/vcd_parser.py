@@ -563,11 +563,12 @@ class VCDParser:
                         return
                     continue
 
-                # Fast path for filtered scans: discard unselected value
-                # changes before running the full parser. Single-bit changes
-                # carry the identifier in this token; vector/real changes
-                # carry it in the next token, which we put back only when the
-                # selected query still needs the value.
+                # ---- Fast-path filter: skip value changes for unneeded signals ----
+                # Check the identifier_code BEFORE calling _consume_value_change().
+                # For 1-bit VCs (90%+ of all tokens), the identifier is tok[1:].
+                # For b/r multi-token VCs, peek the next token (the identifier).
+                # This avoids the full parsing overhead for 99.99% of tokens when
+                # --filter selects a handful of signals out of 200K+.
                 if sids is not None:
                     c = tok[0]
                     if c in '01xzXZ' and len(tok) >= 2:
@@ -578,8 +579,8 @@ class VCDParser:
                         sym_tok = _next()
                         if sym_tok is not None and not self._is_structural_token(sym_tok):
                             if sym_tok not in sids and sym_tok not in bit_map:
-                                continue
-                            pushback.append(sym_tok)
+                                continue  # consume both tokens, skip
+                            pushback.append(sym_tok)  # needed — put back for parser
                         elif sym_tok is not None:
                             pushback.append(sym_tok)
     
@@ -688,10 +689,13 @@ class VCDParser:
         # -- t_max: backward scan from EOF --
         import os as _os
         file_size = _os.path.getsize(self.path)
+        # _data_offset may be a text-mode tell() cookie (opaque, potentially
+        # larger than file_size); clamp to a safe floor for binary seek.
+        safe_data_offset = self._data_offset if self._data_offset < file_size else 0
         t_max = None
         buf_size = 65536
         while buf_size <= 4 * 1024 * 1024:
-            offset = max(self._data_offset, file_size - buf_size)
+            offset = max(safe_data_offset, file_size - buf_size)
             with open(self.path, 'rb') as f:
                 f.seek(offset)
                 chunk = f.read().decode('ascii', errors='replace')
@@ -700,7 +704,7 @@ class VCDParser:
             if timestamps:
                 t_max = max(int(t) for t in timestamps)
                 break
-            if offset <= self._data_offset:
+            if offset <= safe_data_offset:
                 break  # already read the whole data section
             buf_size *= 2
 
@@ -802,6 +806,24 @@ def _build_snapshot_before(vcd, t_at, sids=None):
     if t_at <= 0:
         return {}
     return _build_snapshot(vcd, t_at - 1, sids)
+
+
+def _build_snapshot_pair(vcd, ta, tb, sids=None):
+    """Build snapshots at ta and tb in a single iter_events pass.
+
+    Assumes ta <= tb. Returns (snapshot_a, snapshot_b) where each is
+    {sid: value} at the corresponding boundary (last value at or before
+    the given time, inclusive).
+    """
+    state = {}
+    snapshot_a = None
+    for t, sid, val in vcd.iter_events(0, tb, sids):
+        state[sid] = val
+        if snapshot_a is None and t > ta:
+            snapshot_a = dict(state)
+    if snapshot_a is None:
+        snapshot_a = dict(state)
+    return snapshot_a, dict(state)
 
 
 def _parse_target_value(text):
@@ -1186,20 +1208,24 @@ def _summary_rows(vcd, t0, t1, sids):
     """
     selected = _selected_sids(vcd, sids)
     init_boundary = 0 if t0 == 0 else t0 - 1
-    initial = _build_snapshot(vcd, init_boundary, selected)
     stats = {}
-    for sid, val in initial.items():
-        info = vcd.signals[sid]
-        stats[sid] = {
-            'changes': 0, 'first_at': None, 'last_at': None,
-            'initial': val, 'last': val, 'unique': {val},
-            'prev': val, 'rise_count': 0 if info['width'] == 1 else None,
-            'fall_count': 0 if info['width'] == 1 else None,
-        }
-    for t, group in _event_groups(vcd, t0, t1, selected):
+
+    # Single iter_events from 0 to t1:
+    #   t <= init_boundary -> baseline (last value wins, like _build_snapshot)
+    #   t >  init_boundary -> analysis window (accumulate statistics)
+    for t, sid, val in vcd.iter_events(0, t1, selected):
         if t <= init_boundary:
-            continue
-        for sid, val in group:
+            # Baseline: record value (overwrite, last-write-wins semantics)
+            info = vcd.signals[sid]
+            stats[sid] = {
+                'changes': 0, 'first_at': None, 'last_at': None,
+                'initial': val, 'last': val, 'unique': {val},
+                'prev': val,
+                'rise_count': 0 if info['width'] == 1 else None,
+                'fall_count': 0 if info['width'] == 1 else None,
+            }
+        else:
+            # Analysis window
             info = vcd.signals[sid]
             is_scalar = info['width'] == 1
             if sid not in stats:
@@ -1268,4 +1294,3 @@ def _public_row(row, verbose=False):
         r['width'] = width
         r['type'] = typ
     return r
-

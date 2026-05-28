@@ -259,8 +259,7 @@ def cmd_compare(vcd, args):
     if tb < ta:
         raise _TimeParseError('second compare time must be >= first compare time')
     sids = vcd.match(args.filter)
-    sa = _build_snapshot(vcd, ta, sids)
-    sb = _build_snapshot(vcd, tb, sids)
+    sa, sb = _build_snapshot_pair(vcd, ta, tb, sids)
     diffs = []
     for sid in sorted(set(sa) | set(sb), key=lambda s: vcd.signals[s]['path']):
         va, vb = sa.get(sid), sb.get(sid)
@@ -308,89 +307,98 @@ def cmd_search(vcd, args):
     if changed_sid is not None:
         selected.add(changed_sid)
 
-    # Inclusive snapshot is correct for interval/segment modes: they ask
-    # what state holds at t0.  changed mode needs the state before t0 so
-    # an edge exactly at --begin remains observable.
-    state = (_build_snapshot_before(vcd, t0, selected)
-             if changed_sid is not None else _build_snapshot(vcd, t0, selected))
     limit = _limit(args, 'search')
     verbose = getattr(args, 'verbose', False)
     cond_label = _condition_label(conditions)
     cond_text = _condition_result_text(conditions)
 
     if changed_sid is not None:
+        # Single-pass: build state < t0, then process events t0..t1.
+        state = {}
         events = []
         total = 0
         truncated = False
-        for t, group in _event_groups(vcd, t0, t1, selected):
+        cur_t = None
+        group = []
+
+        for t, sid, val in vcd.iter_events(0, t1, selected):
+            if t < t0:
+                # Baseline: build state up to (but not including) t0.
+                # Last-write-wins semantics, matching _build_snapshot_before.
+                state[sid] = val
+                continue
+
+            # Event processing phase: group by timestamp, process each group
+            # before updating state (so old_val reflects pre-step state).
+            if cur_t is None:
+                cur_t = t
+            if t != cur_t:
+                # Process completed group at cur_t
+                changed = set()
+                for gsid, gval in group:
+                    old_val = state.get(gsid)
+                    if cur_t == 0 and old_val is None:
+                        pass
+                    elif vcd.signals[gsid].get('type') == 'event':
+                        changed.add(gsid)
+                    elif old_val is None:
+                        pass
+                    elif old_val != gval:
+                        changed.add(gsid)
+                for gsid, gval in group:
+                    state[gsid] = gval
+
+                if changed_sid in changed and _conditions_hold(state, conditions):
+                    values, meta = _show_values(vcd, state, show_sids, verbose)
+                    event = {'time_ticks': cur_t, 'time_h': fmt_time(cur_t, ts),
+                             'values': values}
+                    if verbose:
+                        event['meta'] = meta
+                    total += 1
+                    if limit != 0 and len(events) >= limit:
+                        truncated = True
+                        break
+                    events.append(event)
+
+                if truncated:
+                    break
+                cur_t = t
+                group = []
+            group.append((sid, val))
+
+        # Process final pending group
+        if group and not truncated:
+            t = cur_t
             changed = set()
-            for sid, val in group:
-                old_val = state.get(sid)
-                # For ordinary state-carrying signals, --changed means the
-                # value is different from the previous known state. VCD
-                # variables of type `event` are different: every value_change
-                # token is a trigger even if the dumped marker text repeats.
-                # In both cases, t=0 dumpvars-style initialization is not a
-                # real change.
+            for gsid, gval in group:
+                old_val = state.get(gsid)
                 if t == 0 and old_val is None:
                     pass
-                elif vcd.signals[sid].get('type') == 'event':
-                    changed.add(sid)
+                elif vcd.signals[gsid].get('type') == 'event':
+                    changed.add(gsid)
                 elif old_val is None:
-                    # First observed value for an ordinary state signal is a
-                    # definition, not evidence of a transition.  This matters
-                    # when --begin is after time 0 and a signal is first dumped
-                    # inside the query window.
                     pass
-                elif old_val != val:
-                    changed.add(sid)
-                state[sid] = val
-            if changed_sid not in changed:
-                continue
-            if not _conditions_hold(state, conditions):
-                continue
-            values, meta = _show_values(vcd, state, show_sids, verbose)
-            event = {'time_ticks': t, 'time_h': fmt_time(t, ts), 'values': values}
-            if verbose:
-                event['meta'] = meta
-            total += 1
-            if limit != 0 and len(events) >= limit:
-                truncated = True
-                break
-            events.append(event)
-        if args.json:
-            obj = {'mode': 'event', 'condition': cond_label,
-                   'condition_resolved': cond_text,
-                   'changed': vcd.signals[changed_sid]['path'],
-                   'show': [vcd.signals[sid]['path'] for sid in show_sids],
-                   'begin_ticks': t0, 'begin_h': fmt_time(t0, ts),
-                   'end_ticks': t1, 'end_h': fmt_time(t1, ts),
-                   'shown': len(events), 'truncated': truncated,
-                   'events': events}
-            obj.update(_total_json_fields(total, truncated))
-            _json(obj)
-            return
-        if events:
-            print('Found: {} event(s)'.format(_count_label(len(events), total, truncated)))
-            for e in events:
-                print('  T={:<12} {}'.format(e['time_h'], _values_text(e['values'])))
-            if truncated:
-                print(_trunc_line_lower_bound(len(events), total, 'events'))
-        else:
-            print('No event in {}..{} where {} changed and {}.'.format(
-                fmt_time(t0, ts), fmt_time(t1, ts), vcd.signals[changed_sid]['path'], cond_text))
-        return
+                elif old_val != gval:
+                    changed.add(gsid)
+            for gsid, gval in group:
+                state[gsid] = gval
+            if changed_sid in changed and _conditions_hold(state, conditions):
+                values, meta = _show_values(vcd, state, show_sids, verbose)
+                event = {'time_ticks': t, 'time_h': fmt_time(t, ts),
+                         'values': values}
+                if verbose:
+                    event['meta'] = meta
+                total += 1
+                if limit != 0 and len(events) >= limit:
+                    truncated = True
+                else:
+                    events.append(event)
 
     # Interval/segment mode. A segment is an interval further split whenever
     # the displayed show-value tuple changes while the condition remains true.
     has_show = bool(show_sids)
-    active = _conditions_hold(state, conditions)
-    seg_start = t0 if active else None
-    seg_values = None
-    seg_meta = None
-    if active and has_show:
-        seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
-
+    # Single-pass: build state up to t0, then process intervals t0+..t1
+    state = {}
     results = []
     total = 0
     truncated = False
@@ -408,60 +416,125 @@ def cmd_search(vcd, args):
         results.append(row)
         return False
 
-    for t, group in _event_groups(vcd, t0, t1, selected):
-        # _build_snapshot(vcd, t0) already applied all value_changes at t0.
-        # Replaying the same group is idempotent for legal VCD, but skipping
-        # it avoids duplicate work for large initial dumps at the window start.
-        if t <= t0:
-            continue
-        # Interval/segment mode only needs the current cross-section state;
-        # changed-mode edge detection is handled in its own branch above.
-        for sid, val in group:
-            state[sid] = val
+    cur_t = None
+    group = []
+    active = False
+    seg_start = None
+    seg_values = None
+    seg_meta = None
+    init_checks_done = False
 
+    for t, sid, val in vcd.iter_events(0, t1, selected):
+        if t <= t0:
+            state[sid] = val
+            continue
+
+        if not init_checks_done:
+            active = _conditions_hold(state, conditions)
+            seg_start = t0 if active else None
+            if active and has_show:
+                seg_values, seg_meta = _show_values(vcd, state, show_sids, verbose)
+            init_checks_done = True
+
+        # Group by timestamp beyond t0
+        if cur_t is None:
+            cur_t = t
+        if t != cur_t:
+            # Apply accumulated group values to state before checking
+            for gsid, gval in group:
+                state[gsid] = gval
+            # Process completed group at cur_t
+            cond_ok = _conditions_hold(state, conditions)
+            if not has_show:
+                if cond_ok and not active:
+                    active = True
+                    seg_start = cur_t
+                elif not cond_ok and active:
+                    if append_result(emit_interval(seg_start, cur_t)):
+                        break
+                    active = False
+                    seg_start = None
+            else:
+                if not cond_ok:
+                    if active:
+                        row = emit_interval(seg_start, cur_t)
+                        row['values'] = seg_values
+                        if verbose:
+                            row['meta'] = seg_meta
+                        if append_result(row):
+                            break
+                        active = False
+                        seg_start = None
+                        seg_values = None
+                        seg_meta = None
+                else:
+                    new_values, new_meta = _show_values(vcd, state, show_sids, verbose)
+                    if not active:
+                        active = True
+                        seg_start = cur_t
+                        seg_values = new_values
+                        seg_meta = new_meta
+                    elif new_values != seg_values:
+                        row = emit_interval(seg_start, cur_t)
+                        row['values'] = seg_values
+                        if verbose:
+                            row['meta'] = seg_meta
+                        if append_result(row):
+                            break
+                        seg_start = cur_t
+                        seg_values = new_values
+                        seg_meta = new_meta
+
+            if truncated:
+                break
+            cur_t = t
+            group = []
+        group.append((sid, val))
+
+    # Process final pending group
+    if group and not truncated:
+        for gsid, gval in group:
+            state[gsid] = gval
         cond_ok = _conditions_hold(state, conditions)
         if not has_show:
             if cond_ok and not active:
                 active = True
-                seg_start = t
+                seg_start = cur_t
             elif not cond_ok and active:
-                if append_result(emit_interval(seg_start, t)):
-                    break
+                if append_result(emit_interval(seg_start, cur_t)):
+                    pass
                 active = False
                 seg_start = None
-            continue
+        else:
+            if not cond_ok:
+                if active:
+                    row = emit_interval(seg_start, cur_t)
+                    row['values'] = seg_values
+                    if verbose:
+                        row['meta'] = seg_meta
+                    append_result(row)
+                    active = False
+                    seg_start = None
+                    seg_values = None
+                    seg_meta = None
+            else:
+                new_values, new_meta = _show_values(vcd, state, show_sids, verbose)
+                if not active:
+                    active = True
+                    seg_start = cur_t
+                    seg_values = new_values
+                    seg_meta = new_meta
+                elif new_values != seg_values:
+                    row = emit_interval(seg_start, cur_t)
+                    row['values'] = seg_values
+                    if verbose:
+                        row['meta'] = seg_meta
+                    append_result(row)
+                    seg_start = cur_t
+                    seg_values = new_values
+                    seg_meta = new_meta
 
-        if not cond_ok:
-            if active:
-                row = emit_interval(seg_start, t)
-                row['values'] = seg_values
-                if verbose:
-                    row['meta'] = seg_meta
-                if append_result(row):
-                    break
-                active = False
-                seg_start = None
-                seg_values = None
-                seg_meta = None
-            continue
-
-        new_values, new_meta = _show_values(vcd, state, show_sids, verbose)
-        if not active:
-            active = True
-            seg_start = t
-            seg_values = new_values
-            seg_meta = new_meta
-        elif new_values != seg_values:
-            row = emit_interval(seg_start, t)
-            row['values'] = seg_values
-            if verbose:
-                row['meta'] = seg_meta
-            if append_result(row):
-                break
-            seg_start = t
-            seg_values = new_values
-            seg_meta = new_meta
-
+    # Emit final interval if still active
     if active and not truncated:
         row = emit_interval(seg_start, t1)
         if has_show:
