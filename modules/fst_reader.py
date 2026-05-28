@@ -2148,6 +2148,3 @@ def _metadata_replace(meta: FstSignalMetadata, **kwargs) -> FstSignalMetadata:
     }
     data.update(kwargs)
     return FstSignalMetadata(**data)
-
-
-

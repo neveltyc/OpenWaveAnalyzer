@@ -95,43 +95,88 @@ class FSTParser:
                         break
         return out
 
-    def iter_events(self, t0=0, t1=None, sids=None):
+    def _format_raw_value(self, handle, raw_val):
+        """Convert raw FST bytes to display string for a single value."""
+        if isinstance(raw_val, memoryview):
+            raw_val = bytes(raw_val)
+        var = self._reader._handle_to_var.get(handle)
+        var_type = var.var_type if var else -1
+        info = self.signals[handle]
         real_types = {FstVarType.VCD_REAL, FstVarType.VCD_REAL_PARAMETER,
                       FstVarType.VCD_REALTIME, FstVarType.SV_SHORTREAL}
+        if var_type in real_types and len(raw_val) >= 8:
+            try:
+                fmt = '<d' if self._reader.header.double_endian_match else '>d'
+                dval = struct.unpack(fmt, raw_val[:8])[0]
+                return '{:.16g}'.format(dval)
+            except Exception:
+                return raw_val.decode('utf-8', errors='replace')
+        elif info.get('type') == 'string' or info['width'] == 0:
+            return raw_val.decode('utf-8', errors='replace')
+        elif info['width'] == 1:
+            val_str = raw_val.decode('ascii', errors='replace')
+            return val_str if val_str in '01xz' else 'x'
+        else:
+            val_str = raw_val.decode('ascii', errors='replace')
+            if not all(c in '01xz' for c in val_str):
+                val_str = ''.join(c if c in '01xz' else 'x' for c in val_str)
+            return val_str
+
+    def iter_events(self, t0=0, t1=None, sids=None):
         for section_idx in range(len(self._reader._vc_sections)):
-            for fst_time, changes in self._reader.iter_time_value_pairs(section_idx):
-                if fst_time < t0:
+            if sids is not None:
+                yield from self._iter_events_filtered(
+                    section_idx, t0, t1, sids)
+            else:
+                yield from self._iter_events_all(
+                    section_idx, t0, t1)
+
+    def _iter_events_filtered(self, section_idx, t0, t1, sids):
+        """Selective path: decompress only the requested handles."""
+        # Build per-handle iterators and merge in time order.
+        # Each entry in the heap: (time, sequence_counter, handle, value_bytes)
+        import heapq
+        iterators = []
+        for handle in sids:
+            if handle not in self.signals:
+                continue
+            it = self._reader.iter_value_changes(handle, section_idx)
+            iterators.append((it, handle))
+
+        heap = []
+        seq = 0
+        for it, handle in iterators:
+            val = next(it, None)
+            if val is not None:
+                fst_time, raw_val = val
+                heapq.heappush(heap, (fst_time, seq, handle, raw_val, it))
+                seq += 1
+
+        while heap:
+            fst_time, _, handle, raw_val, it = heapq.heappop(heap)
+            if t1 is not None and fst_time > t1:
+                return
+            if fst_time >= t0:
+                yield (fst_time, handle, self._format_raw_value(handle, raw_val))
+            # Advance this handle's iterator
+            val = next(it, None)
+            if val is not None:
+                next_time, next_raw = val
+                heapq.heappush(heap, (next_time, seq, handle, next_raw, it))
+                seq += 1
+
+    def _iter_events_all(self, section_idx, t0, t1):
+        """Bulk path: decompress all handles (original behavior)."""
+        for fst_time, changes in self._reader.iter_time_value_pairs(section_idx):
+            if fst_time < t0:
+                continue
+            if t1 is not None and fst_time > t1:
+                return
+            for handle, raw_val in changes:
+                if handle not in self.signals:
                     continue
-                if t1 is not None and fst_time > t1:
-                    return
-                for handle, raw_val in changes:
-                    if sids is not None and handle not in sids:
-                        continue
-                    if handle not in self.signals:
-                        continue
-                    if isinstance(raw_val, memoryview):
-                        raw_val = bytes(raw_val)
-                    var = self._reader._handle_to_var.get(handle)
-                    var_type = var.var_type if var else -1
-                    info = self.signals[handle]
-                    if var_type in real_types and len(raw_val) >= 8:
-                        try:
-                            fmt = '<d' if self._reader.header.double_endian_match else '>d'
-                            dval = struct.unpack(fmt, raw_val[:8])[0]
-                            val_str = '{:.16g}'.format(dval)
-                        except Exception:
-                            val_str = raw_val.decode('utf-8', errors='replace')
-                    elif info.get('type') == 'string' or info['width'] == 0:
-                        val_str = raw_val.decode('utf-8', errors='replace')
-                    elif info['width'] == 1:
-                        val_str = raw_val.decode('ascii', errors='replace')
-                        if val_str not in '01xz':
-                            val_str = 'x'
-                    else:
-                        val_str = raw_val.decode('ascii', errors='replace')
-                        if not all(c in '01xz' for c in val_str):
-                            val_str = ''.join(c if c in '01xz' else 'x' for c in val_str)
-                    yield (fst_time, handle, val_str)
+                yield (fst_time, handle,
+                       self._format_raw_value(handle, raw_val))
 
     def scan_time_range(self):
         return self._reader.header.start_time, self._reader.header.end_time
@@ -158,5 +203,3 @@ def wave_parser(path):
     except Exception:
         pass
     return VCDParser(path)
-
-
