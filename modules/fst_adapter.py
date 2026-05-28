@@ -163,19 +163,19 @@ class FSTParser:
     def _iter_events_filtered(self, section_idx, t0, t1, sids):
         """Selective path: decompress only the requested handles.
 
-        Uses _scan_chain_entries for targeted chain lookup — avoids parsing
-        the full 223K-entry chain table when only a few handles are needed.
+        Uses _scan_chain_entries (targeted chain lookup) to avoid parsing the
+        full 223K-entry chain table. _scan_chain_entries falls back to a full
+        parse internally if it hits an alias to an unselected handle, so the
+        result is always identical to the full path.
         """
         sect = self._reader._vc_sections[section_idx]
         valid_handles = [h for h in sids if h in self.signals]
         if not valid_handles:
             return
 
-        # Targeted chain lookup: scan chain stream only up to max(handles),
-        # returning entries for requested handles only.
         chain_entries = self._reader._scan_chain_entries(section_idx, valid_handles)
+        sig_lens = self._reader._signal_lengths
 
-        # Build per-handle iterators and merge in time order.
         iterators = []
         for handle in valid_handles:
             entry = chain_entries.get(handle)
@@ -183,7 +183,12 @@ class FSTParser:
                 it = self._reader.iter_value_changes(
                     handle, section_idx, _chain_entry=entry)
             else:
-                # No chain data — emit initial value only
+                # No chain data for this handle in this section. Mirror the
+                # no-data branch of iter_value_changes: a zero-length string
+                # emits nothing; everything else emits its initial value.
+                idx0 = handle - 1
+                if idx0 < len(sig_lens) and not sig_lens[idx0]:
+                    continue
                 initial = self._reader.get_initial_value(handle, section_idx)
                 it = iter([(sect.beg_time, initial)])
             iterators.append((it, handle))

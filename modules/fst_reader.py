@@ -587,28 +587,29 @@ class _FstReader:
         sect._parsed = True
 
     def _ensure_time_table_parsed(self, section_index: int) -> None:
-        """Parse only the time table for a section (cheap, ~0.01s).
-
-        Used by the filtered path which doesn't need the full chain table.
-        Leaves _payload intact so a later full parse can still run.
-        """
+        """Parse only the time table (cheap). Leaves _payload for later full parse."""
         sect = self._vc_sections[section_index]
         if sect.times is not None:
             return
         payload = sect._payload
         if payload is None:
             if sect._parsed:
-                return  # already fully parsed, times should be set
+                return
             raise _FstFormatError("section payload not available for time table parse")
         sect.times = self._parse_time_table(payload)
 
     def _scan_chain_entries(self, section_index: int, handle_indices) -> dict:
-        """Scan chain table for specific handles only.
+        """Scan chain table for specific handles only — fast filtered path.
 
-        Returns {handle_index_0based: (chain_off, chain_len)}.
-        Stops scanning after the last needed handle — much faster than
-        full _parse_chain_table when handles are clustered in the low range.
-        Avoids the [0]*223K array allocation entirely.
+        Returns {handle_1based: (chain_off, chain_len)} for handles with real
+        data. Stops after the last needed handle, avoiding the [0]*223K array
+        allocation and full alias-resolution pass.
+
+        CORRECTNESS: if any requested handle is an alias whose target is NOT in
+        the requested set, the sparse scan cannot resolve it. In that case we
+        fall back to a full _ensure_section_parsed and retry — guaranteeing the
+        same result as the full path, at the cost of the speedup for that
+        section. Non-aliased (or self-contained alias) queries keep the speedup.
         """
         sect = self._vc_sections[section_index]
         if sect._parsed:
@@ -616,7 +617,10 @@ class _FstReader:
             for h in handle_indices:
                 idx = h - 1
                 if 0 <= idx < len(sect.chain_table):
-                    result[h] = (sect.chain_table[idx], sect.chain_table_lengths[idx])
+                    off = sect.chain_table[idx]
+                    length = sect.chain_table_lengths[idx]
+                    if off > 0 and length > 0:
+                        result[h] = (off, length)
             return result
 
         payload = sect._payload
@@ -637,52 +641,66 @@ class _FstReader:
             return {}
         chain_data = payload[indx_pos:indx_pos + chain_clen]
 
-        # Sparse collection: only record entries for needed handles.
-        # collected[idx] = (chain_off, raw_length_or_alias)
-        collected = {}
+        collected = {}  # idx -> (off, length_or_None)
         pnt = 0; idx = 0; pval = 0; pidx = -1
 
         if sect.block_type == FST_BL_VCDATA_DYN_ALIAS2:
             prev_alias = 0
-            while pnt < chain_clen and idx <= max_needed + 1:
+            while pnt < chain_clen:
                 if chain_data[pnt] & 0x01:
                     shval, skiplen = read_svarint64(chain_data, pnt)
                     shval >>= 1
                     if shval > 0:
                         pval += shval
                         if idx in needed_0:
-                            collected[idx] = (pval, None)  # length resolved below
+                            collected[idx] = (pval, None)
                         if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
                             collected[pidx] = (collected[pidx][0], pval - collected[pidx][0])
                         pidx = idx
                         idx += 1
                     elif shval < 0:
                         if idx in needed_0:
+                            # Alias whose target is (-shval)-1.  If the target is
+                            # not in needed_0 the sparse scan can't resolve it —
+                            # abort now and fall back to full parse.
+                            target = (-shval) - 1
+                            if target not in needed_0:
+                                self._ensure_section_parsed(section_index)
+                                return self._scan_chain_entries(section_index, handle_indices)
                             collected[idx] = (0, shval)
                         prev_alias = shval
                         idx += 1
                     else:
                         if idx in needed_0:
+                            target = (-prev_alias) - 1
+                            if target not in needed_0:
+                                self._ensure_section_parsed(section_index)
+                                return self._scan_chain_entries(section_index, handle_indices)
                             collected[idx] = (0, prev_alias)
                         idx += 1
                 else:
                     val, skiplen = read_varint32(chain_data, pnt)
                     loopcnt = val >> 1
-                    skip_end = idx + loopcnt
-                    idx = skip_end  # fast skip — all zero entries
+                    idx += loopcnt
                 pnt += skiplen
-
-            # Sentinel: resolve pending pidx length
+                # Past all needed handles AND every collected data entry's
+                # length has been resolved by a following data entry → stop.
+                if idx > max_needed and not any(v[1] is None for v in collected.values()):
+                    break
             if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
                 sentinel_off = indx_pos - sect.vc_start
                 collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
         else:
-            while pnt < chain_clen and idx <= max_needed + 1:
+            while pnt < chain_clen:
                 val, skiplen = read_varint32(chain_data, pnt)
                 if not val:
                     pnt += skiplen
                     val2, skiplen = read_varint32(chain_data, pnt)
                     if idx in needed_0:
+                        target = val2 - 1
+                        if target not in needed_0:
+                            self._ensure_section_parsed(section_index)
+                            return self._scan_chain_entries(section_index, handle_indices)
                         collected[idx] = (0, -val2)
                     idx += 1
                 elif val & 1:
@@ -697,29 +715,30 @@ class _FstReader:
                     loopcnt = val >> 1
                     idx += loopcnt
                 pnt += skiplen
-
+                if idx > max_needed and not any(v[1] is None for v in collected.values()):
+                    break
             if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
                 sentinel_off = indx_pos - sect.vc_start
                 collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
 
-        # Alias resolution for collected entries
+        # Alias resolution. If a needed handle aliases a target we did not
+        # collect, the sparse scan is insufficient — fall back to full parse.
         for cidx in list(collected):
             off, length = collected[cidx]
             if length is not None and length < 0 and off == 0:
                 src = (-length) - 1
-                if src in collected:
+                if src in collected and collected[src][1] is not None and collected[src][1] > 0:
                     collected[cidx] = collected[src]
-                elif sect._parsed and src < len(sect.chain_table):
-                    collected[cidx] = (sect.chain_table[src], sect.chain_table_lengths[src])
                 else:
-                    collected[cidx] = (0, 0)
+                    # Alias target not available in sparse scan — must parse fully.
+                    self._ensure_section_parsed(section_index)
+                    return self._scan_chain_entries(section_index, handle_indices)
 
-        # Convert to handle-based dict (1-based)
         result = {}
         for h in handle_indices:
-            idx = h - 1
-            if idx in collected:
-                off, length = collected[idx]
+            i0 = h - 1
+            if i0 in collected:
+                off, length = collected[i0]
                 if off is not None and length is not None and off > 0 and length > 0:
                     result[h] = (off, length)
         return result
@@ -1681,21 +1700,17 @@ class _FstReader:
         idx = handle - 1
 
         if _chain_entry is not None:
-            # Filtered fast path: chain entry pre-computed by _scan_chain_entries,
-            # only time table needed (no full chain table parse).
+            # Filtered fast path: chain entry pre-resolved by _scan_chain_entries.
             self._ensure_time_table_parsed(section_index)
             chain_off, chain_len = _chain_entry
         else:
-            # Full path: parse entire section (chain table + time table).
             self._ensure_section_parsed(section_index)
-
             if idx >= len(sect.chain_table) or idx >= len(sect.chain_table_lengths):
                 if _include_section_initial:
                     initial = self.get_initial_value(handle, section_index)
                     if not respect_blackout or self.is_dump_active_at(sect.beg_time):
                         yield (sect.beg_time, initial)
                 return
-
             chain_off = sect.chain_table[idx]
             chain_len = sect.chain_table_lengths[idx]
 
