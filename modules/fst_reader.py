@@ -38,6 +38,8 @@ class _VcSection:
     chain_table_lengths: list = None
     indx_pos: int = 0
     indx_len: int = 0
+    _payload: Any = None   # stored for lazy parsing of time_table/chain_table
+    _parsed: bool = False  # True once time_table and chain_table are populated
 
 
 class _FstReader:
@@ -526,6 +528,12 @@ class _FstReader:
         return b.block_type in _FstReader.VCDATA_BLOCK_TYPES
 
     def _parse_vc_sections(self) -> None:
+        """Parse VCDATA section headers only (beg_time, end_time, frame_data,
+        vc_maxhandle, pack_type).  Time table and chain table are deferred to
+        _ensure_section_parsed() — called lazily by iter_time_value_pairs /
+        iter_value_changes on first access.  This makes info/list O(hierarchy)
+        instead of O(hierarchy + all_sections × 223K_chain_entries).
+        """
         vc_blocks = [b for b in self._blocks if self._is_vc_block(b)]
         if not vc_blocks:
             return
@@ -561,9 +569,21 @@ class _FstReader:
                 raise _FstFormatError("truncated VCDATA before pack type")
             sect.pack_type = chr(payload[off])
             off += 1
-            sect.times = self._parse_time_table(payload)
-            self._parse_chain_table(sect, payload)
+            sect._payload = payload
             self._vc_sections.append(sect)
+
+    def _ensure_section_parsed(self, section_index: int) -> None:
+        """Parse time_table and chain_table for a section on first access."""
+        sect = self._vc_sections[section_index]
+        if sect._parsed:
+            return
+        payload = sect._payload
+        if payload is None:
+            raise _FstFormatError("section payload not available for lazy parse")
+        sect.times = self._parse_time_table(payload)
+        self._parse_chain_table(sect, payload)
+        sect._payload = None
+        sect._parsed = True
 
     def _build_section_time_index(self) -> None:
         """Build section begin/end arrays for time-window queries."""
@@ -1469,6 +1489,7 @@ class _FstReader:
     ) -> Iterator[tuple[int, bytes]]:
         if section_index >= len(self._vc_sections):
             return
+        self._ensure_section_parsed(section_index)
         sect = self._vc_sections[section_index]
         idx = handle - 1
 
@@ -1573,6 +1594,7 @@ class _FstReader:
         """
         if section_index >= len(self._vc_sections):
             return
+        self._ensure_section_parsed(section_index)
         sect = self._vc_sections[section_index]
         times = sect.times or []
         max_handle = self.header.max_handle

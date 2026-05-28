@@ -132,7 +132,16 @@ class FSTParser:
             return val_str
 
     def iter_events(self, t0=0, t1=None, sids=None):
-        for section_idx in range(len(self._reader._vc_sections)):
+        sections = self._reader._vc_sections
+        for section_idx in range(len(sections)):
+            sect = sections[section_idx]
+            # Skip sections entirely outside the query time window.
+            # Combined with lazy parsing, skipped sections never get their
+            # time_table/chain_table decoded — O(0) instead of O(223K).
+            if sect.end_time < t0:
+                continue
+            if t1 is not None and sect.beg_time > t1:
+                break
             if sids is not None:
                 yield from self._iter_events_filtered(
                     section_idx, t0, t1, sids)

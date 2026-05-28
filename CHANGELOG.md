@@ -9,6 +9,12 @@ All notable changes to open_wave_analyzer.
 
 - Optimize _summary_rows baseline phase: defer full stats dict creation to
   first analysis-window event, using cheap baseline dict during preamble.
+- Defer FST VCDATA time_table and chain_table parsing to first access
+  (_ensure_section_parsed), making info/list O(hierarchy) instead of
+  O(hierarchy + all sections).  Add section-level time-window skipping in
+  FSTParser.iter_events to avoid sections outside [t0, t1].  Large FST
+  header-only commands drop from ~24s to ~6s (-74%); time-range queries
+  (snapshot, compare, --begin/--end) drop ~78-80%.
 
 ## [2.0.1] - 2026-05-28
 
