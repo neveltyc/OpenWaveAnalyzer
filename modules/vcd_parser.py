@@ -818,9 +818,9 @@ def _build_snapshot_pair(vcd, ta, tb, sids=None):
     state = {}
     snapshot_a = None
     for t, sid, val in vcd.iter_events(0, tb, sids):
-        state[sid] = val
         if snapshot_a is None and t > ta:
             snapshot_a = dict(state)
+        state[sid] = val
     if snapshot_a is None:
         snapshot_a = dict(state)
     return snapshot_a, dict(state)

@@ -394,6 +394,29 @@ def cmd_search(vcd, args):
                 else:
                     events.append(event)
 
+        if args.json:
+            obj = {'mode': 'event', 'condition': cond_label,
+                   'condition_resolved': cond_text,
+                   'changed': vcd.signals[changed_sid]['path'],
+                   'show': [vcd.signals[sid]['path'] for sid in show_sids],
+                   'begin_ticks': t0, 'begin_h': fmt_time(t0, ts),
+                   'end_ticks': t1, 'end_h': fmt_time(t1, ts),
+                   'shown': len(events), 'truncated': truncated,
+                   'events': events}
+            obj.update(_total_json_fields(total, truncated))
+            _json(obj)
+            return
+        if events:
+            print('Found: {} event(s)'.format(_count_label(len(events), total, truncated)))
+            for e in events:
+                print('  T={:<12} {}'.format(e['time_h'], _values_text(e['values'])))
+            if truncated:
+                print(_trunc_line_lower_bound(len(events), total, 'events'))
+        else:
+            print('No event in {}..{} where {} changed and {}.'.format(
+                fmt_time(t0, ts), fmt_time(t1, ts), vcd.signals[changed_sid]['path'], cond_text))
+        return
+
     # Interval/segment mode. A segment is an interval further split whenever
     # the displayed show-value tuple changes while the condition remains true.
     has_show = bool(show_sids)

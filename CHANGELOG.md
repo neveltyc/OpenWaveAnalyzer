@@ -2,9 +2,30 @@
 
 All notable changes to open_wave_analyzer.
 
-## [Unreleased]
+## [2.0.1] - 2026-05-28
 
 ### Changed
+
+ 
+- Merge FSTParser.__init__ three hierarchy() passes into a single traversal,
+  compute raw_var_count and raw_type_counts inline, and replace per-path
+  re.match() with path.find(' [') + slice to eliminate ~275K regex calls.
+- Replace double-scan VCD patterns in summary, compare, and search commands
+  with single iter_events passes: _summary_rows builds both baseline
+  snapshot and per-signal statistics in one scan; cmd_compare uses
+  _build_snapshot_pair to capture two snapshots in one pass; cmd_search
+  builds state and processes events in a single iteration for both changed
+  and interval/segment modes.
+- Speed up filtered FST iteration with single-handle fast path.
+- Remove inline heapq import in FST adapter (heapq is imported at file
+  level).
+
+### Fixed
+
+- Fix DYN_ALIAS2 chain table clobber in FST reader and add dump command
+  defenses against malformed value-change data.
+- Add missing comp_body guard in FST reader to prevent access on
+  non-existent VC section compression bodies.
 
 - Speed up filtered VCD scans by skipping unselected scalar, vector, and real
   value-change tokens before full value parsing.

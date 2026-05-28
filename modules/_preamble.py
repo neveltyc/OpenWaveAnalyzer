@@ -65,7 +65,7 @@ Notes:
   "no match" result.
 """
 
-__version__ = '2.0.0'
+__version__ = '2.0.1'
 
 import sys, os, re, math, json, struct
 import zlib as _zlib

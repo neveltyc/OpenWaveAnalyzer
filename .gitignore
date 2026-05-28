@@ -37,3 +37,7 @@ Thumbs.db
 *.log
 test_output/
 
+# Local temp files
+_result.txt
+_run.py
+_p1c_patch.py
