@@ -809,6 +809,7 @@ class _VcSection:
     pack_type: str = ""
     chain_table: list = None
     chain_table_lengths: list = None
+    active_handles: frozenset = None  # indices with non-zero chain data
     indx_pos: int = 0
     indx_len: int = 0
     _payload: Any = None   # stored for lazy parsing of time_table/chain_table
@@ -1399,10 +1400,11 @@ class _FstReader:
         finally:
             _g_fst_reader = None
 
-        for (idx, sect), (times, ct, ctl) in zip(unparsed, results):
+        for (idx, sect), (times, ct, ctl, ah) in zip(unparsed, results):
             sect.times = times
             sect.chain_table = ct
             sect.chain_table_lengths = ctl
+            sect.active_handles = ah
             sect._payload = None
             sect._parsed = True
 
@@ -1522,6 +1524,10 @@ class _FstReader:
                     chain_table_lengths[i] = chain_table_lengths[v]
         sect.chain_table = chain_table[:idx]
         sect.chain_table_lengths = chain_table_lengths[:idx]
+        sect.active_handles = frozenset(
+            i for i in range(idx)
+            if chain_table[i] > 0 and chain_table_lengths[i] > 0
+        )
 
     def _parse_blackouts(self) -> None:
         self._blackouts: list[tuple[int, bool]] = []
@@ -2443,7 +2449,9 @@ class _FstReader:
         headptr: list[int] = [0] * max_handle
         length_remaining: list[int] = [0] * max_handle
         traversal_buf = bytearray()
-        for idx in range(max_handle):
+        # Iterate only handles with actual chain data (~10K out of 223K).
+        active = sect.active_handles if sect.active_handles is not None else range(max_handle)
+        for idx in active:
             if idx >= len(sect.chain_table):
                 continue
             chain_off = sect.chain_table[idx]
@@ -2614,7 +2622,7 @@ def _parse_section_worker(section_index):
 
     # _parse_chain_table does not use self at all.
     _FstReader._parse_chain_table(None, sect, payload)
-    return (times, sect.chain_table, sect.chain_table_lengths)
+    return (times, sect.chain_table, sect.chain_table_lengths, sect.active_handles)
 
 
 class _ByteView:
