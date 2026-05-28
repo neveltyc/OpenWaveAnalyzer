@@ -176,12 +176,28 @@ class FSTParser:
         chain_entries = self._reader._scan_chain_entries(section_idx, valid_handles)
         sig_lens = self._reader._signal_lengths
 
+        # When the section's frame snapshot precedes its first recorded
+        # timestamp, every signal carries its initial (frame) value at beg_time.
+        # The all-signal path (iter_time_value_pairs) emits these; mirror that
+        # here so filtered dumps don't silently drop the beg_time sample.
+        self._reader._ensure_time_table_parsed(section_idx)
+        times = sect.times or []
+        emit_initial = bool(times) and sect.beg_time != times[0]
+
+        def _prepend_initial(handle, inner):
+            yield (sect.beg_time, self._reader.get_initial_value(handle, section_idx))
+            yield from inner
+
         iterators = []
         for handle in valid_handles:
             entry = chain_entries.get(handle)
             if entry is not None:
                 it = self._reader.iter_value_changes(
                     handle, section_idx, _chain_entry=entry)
+                if emit_initial:
+                    # Chain's first event is at times[k] >= times[0] > beg_time,
+                    # so prepending the beg_time sample never duplicates a time.
+                    it = _prepend_initial(handle, it)
             else:
                 # No chain data for this handle in this section. Mirror the
                 # no-data branch of iter_value_changes: a zero-length string

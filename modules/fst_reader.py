@@ -598,6 +598,25 @@ class _FstReader:
             raise _FstFormatError("section payload not available for time table parse")
         sect.times = self._parse_time_table(payload)
 
+    @staticmethod
+    def _locate_chain_data(payload):
+        """Locate the chain-table byte range within a section payload.
+
+        Returns (chain_data_bytes, chain_clen, indx_pos). Shared by
+        _parse_chain_table (full) and _scan_chain_entries (sparse) so the
+        header-offset arithmetic lives in exactly one place.
+        """
+        n = len(payload)
+        tsec_clen = _u64be(payload, n - 16)
+        indx_pntr = n - 24 - tsec_clen - 8
+        if indx_pntr < 0:
+            raise _FstFormatError("invalid chain table position")
+        chain_clen = _u64be(payload, indx_pntr)
+        indx_pos = indx_pntr - chain_clen
+        if indx_pos < 0:
+            raise _FstFormatError("invalid chain table offset")
+        return payload[indx_pos:indx_pos + chain_clen], chain_clen, indx_pos
+
     def _scan_chain_entries(self, section_index: int, handle_indices) -> dict:
         """Scan chain table for specific handles only — fast filtered path.
 
@@ -628,20 +647,24 @@ class _FstReader:
             return {}
 
         needed_0 = frozenset(h - 1 for h in handle_indices)
-        max_needed = max(needed_0) if needed_0 else -1
-
-        n = len(payload)
-        tsec_clen = _u64be(payload, n - 16)
-        indx_pntr = n - 24 - tsec_clen - 8
-        if indx_pntr < 0:
+        if not needed_0:
             return {}
-        chain_clen = _u64be(payload, indx_pntr)
-        indx_pos = indx_pntr - chain_clen
-        if indx_pos < 0:
-            return {}
-        chain_data = payload[indx_pos:indx_pos + chain_clen]
+        max_needed = max(needed_0)
 
-        collected = {}  # idx -> (off, length_or_None)
+        try:
+            chain_data, chain_clen, indx_pos = self._locate_chain_data(payload)
+        except _FstFormatError:
+            return {}
+
+        def _fallback():
+            # Sparse scan insufficient (alias to unselected/forward target).
+            # Full parse always yields the correct result; the recursive call
+            # then takes the fast sect._parsed branch above. Recursion depth ≤ 2.
+            self._ensure_section_parsed(section_index)
+            return self._scan_chain_entries(section_index, handle_indices)
+
+        collected = {}        # idx -> (off, length_or_None)
+        unresolved = 0        # count of collected entries whose length is None
         pnt = 0; idx = 0; pval = 0; pidx = -1
 
         if sect.block_type == FST_BL_VCDATA_DYN_ALIAS2:
@@ -652,44 +675,35 @@ class _FstReader:
                     shval >>= 1
                     if shval > 0:
                         pval += shval
-                        if idx in needed_0:
-                            collected[idx] = (pval, None)
                         if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
                             collected[pidx] = (collected[pidx][0], pval - collected[pidx][0])
+                            unresolved -= 1
+                        if idx in needed_0:
+                            collected[idx] = (pval, None)
+                            unresolved += 1
                         pidx = idx
                         idx += 1
                     elif shval < 0:
                         if idx in needed_0:
-                            # Alias whose target is (-shval)-1.  If the target is
-                            # not in needed_0 the sparse scan can't resolve it —
-                            # abort now and fall back to full parse.
-                            target = (-shval) - 1
-                            if target not in needed_0:
-                                self._ensure_section_parsed(section_index)
-                                return self._scan_chain_entries(section_index, handle_indices)
+                            # Alias target = (-shval)-1. If not also selected, the
+                            # sparse scan can't resolve it — fall back immediately.
+                            if ((-shval) - 1) not in needed_0:
+                                return _fallback()
                             collected[idx] = (0, shval)
                         prev_alias = shval
                         idx += 1
                     else:
                         if idx in needed_0:
-                            target = (-prev_alias) - 1
-                            if target not in needed_0:
-                                self._ensure_section_parsed(section_index)
-                                return self._scan_chain_entries(section_index, handle_indices)
+                            if ((-prev_alias) - 1) not in needed_0:
+                                return _fallback()
                             collected[idx] = (0, prev_alias)
                         idx += 1
                 else:
                     val, skiplen = read_varint32(chain_data, pnt)
-                    loopcnt = val >> 1
-                    idx += loopcnt
+                    idx += (val >> 1)
                 pnt += skiplen
-                # Past all needed handles AND every collected data entry's
-                # length has been resolved by a following data entry → stop.
-                if idx > max_needed and not any(v[1] is None for v in collected.values()):
+                if idx > max_needed and unresolved == 0:
                     break
-            if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
-                sentinel_off = indx_pos - sect.vc_start
-                collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
         else:
             while pnt < chain_clen:
                 val, skiplen = read_varint32(chain_data, pnt)
@@ -697,48 +711,51 @@ class _FstReader:
                     pnt += skiplen
                     val2, skiplen = read_varint32(chain_data, pnt)
                     if idx in needed_0:
-                        target = val2 - 1
-                        if target not in needed_0:
-                            self._ensure_section_parsed(section_index)
-                            return self._scan_chain_entries(section_index, handle_indices)
+                        if (val2 - 1) not in needed_0:
+                            return _fallback()
                         collected[idx] = (0, -val2)
                     idx += 1
                 elif val & 1:
                     pval += (val >> 1)
-                    if idx in needed_0:
-                        collected[idx] = (pval, None)
                     if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
                         collected[pidx] = (collected[pidx][0], pval - collected[pidx][0])
+                        unresolved -= 1
+                    if idx in needed_0:
+                        collected[idx] = (pval, None)
+                        unresolved += 1
                     pidx = idx
                     idx += 1
                 else:
-                    loopcnt = val >> 1
-                    idx += loopcnt
+                    idx += (val >> 1)
                 pnt += skiplen
-                if idx > max_needed and not any(v[1] is None for v in collected.values()):
+                if idx > max_needed and unresolved == 0:
                     break
-            if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
-                sentinel_off = indx_pos - sect.vc_start
-                collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
 
-        # Alias resolution. If a needed handle aliases a target we did not
-        # collect, the sparse scan is insufficient — fall back to full parse.
+        # Resolve the final data entry's length from the sentinel offset.
+        if pidx >= 0 and pidx in collected and collected[pidx][1] is None:
+            sentinel_off = indx_pos - sect.vc_start
+            collected[pidx] = (collected[pidx][0], sentinel_off - collected[pidx][0])
+            unresolved -= 1
+
+        # Resolve alias entries. Mirrors _parse_chain_table's alias loop, which
+        # only resolves backward references (target index < current). Anything
+        # else (forward ref, target not collected, chained alias) falls back.
         for cidx in list(collected):
             off, length = collected[cidx]
             if length is not None and length < 0 and off == 0:
                 src = (-length) - 1
-                if src in collected and collected[src][1] is not None and collected[src][1] > 0:
+                if (src < cidx and src in collected
+                        and collected[src][1] is not None and collected[src][1] > 0):
                     collected[cidx] = collected[src]
                 else:
-                    # Alias target not available in sparse scan — must parse fully.
-                    self._ensure_section_parsed(section_index)
-                    return self._scan_chain_entries(section_index, handle_indices)
+                    return _fallback()
 
         result = {}
         for h in handle_indices:
             i0 = h - 1
-            if i0 in collected:
-                off, length = collected[i0]
+            entry = collected.get(i0)
+            if entry is not None:
+                off, length = entry
                 if off is not None and length is not None and off > 0 and length > 0:
                     result[h] = (off, length)
         return result
@@ -824,16 +841,11 @@ class _FstReader:
         return times
 
     def _parse_chain_table(self, sect: _VcSection, payload: bytes) -> None:
-        n = len(payload)
-        tsec_clen = _u64be(payload, n - 16)
-        indx_pntr = n - 24 - tsec_clen - 8
-        if indx_pntr < 0:
-            raise _FstFormatError("invalid chain table position")
-        chain_clen = _u64be(payload, indx_pntr)
-        indx_pos = indx_pntr - chain_clen
-        if indx_pos < 0:
-            raise _FstFormatError("invalid chain table offset")
-        chain_data = payload[indx_pos:indx_pos + chain_clen]
+        # NOTE: the chain-stream decode loop below is mirrored in
+        # _scan_chain_entries (sparse variant). If you change the encoding
+        # handling here, update that method too — test_scan_chain_parity
+        # cross-checks the two against every fixture and will fail on drift.
+        chain_data, chain_clen, indx_pos = self._locate_chain_data(payload)
         sect.indx_pos = indx_pos
         sect.indx_len = chain_clen
         vc_maxhandle = sect.vc_maxhandle
