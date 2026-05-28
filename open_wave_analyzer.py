@@ -1389,7 +1389,7 @@ class _FstReader:
         pnt = 0
         idx = 0
         pval = 0
-        pidx = 0
+        pidx = -1
         if sect.block_type == FST_BL_VCDATA_DYN_ALIAS2:
             prev_alias = 0
             while pnt < chain_clen:
@@ -1399,7 +1399,7 @@ class _FstReader:
                     if shval > 0:
                         pval += shval
                         chain_table[idx] = pval
-                        if idx:
+                        if pidx >= 0:
                             chain_table_lengths[pidx] = pval - chain_table[pidx]
                         pidx = idx
                         idx += 1
@@ -1431,7 +1431,7 @@ class _FstReader:
                 elif val & 1:
                     pval += (val >> 1)
                     chain_table[idx] = pval
-                    if idx:
+                    if pidx >= 0:
                         chain_table_lengths[pidx] = pval - chain_table[pidx]
                     pidx = idx
                     idx += 1
@@ -1442,7 +1442,8 @@ class _FstReader:
                         idx += 1
                 pnt += skiplen
         chain_table[idx] = indx_pos - sect.vc_start
-        chain_table_lengths[pidx] = chain_table[idx] - chain_table[pidx]
+        if pidx >= 0:
+            chain_table_lengths[pidx] = chain_table[idx] - chain_table[pidx]
         for i in range(idx):
             v = chain_table_lengths[i]
             if v < 0 and chain_table[i] == 0:
@@ -2375,7 +2376,7 @@ class _FstReader:
                 continue
             chain_off = sect.chain_table[idx]
             chain_len = sect.chain_table_lengths[idx]
-            if chain_off < 0 or chain_len <= 0:
+            if chain_off <= 0 or chain_len <= 0:
                 continue
             vc_data_start = sect.block_offset + 9 + sect.vc_start
             start = vc_data_start + chain_off
@@ -2387,6 +2388,8 @@ class _FstReader:
             dest_len = first_val
             if first_val:
                 comp_data = raw_compressed[skiplen:]
+                if not comp_data:
+                    continue
                 decompressed = decompress_block(comp_data, sect.pack_type, dest_len)
             else:
                 dest_len = chain_len - skiplen
