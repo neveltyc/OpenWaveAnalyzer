@@ -245,10 +245,19 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
 
     Matches the LZ4 block format used by libfst's hierarchy and VCDATA
     blocks. This is the raw block format, not framed .lz4.
+
+    The match copy is the hot loop.  LZ4 matches are overwhelmingly
+    non-overlapping (offset >= match_len), which can be satisfied with one
+    C-level ``bytearray.extend`` of a slice instead of a Python-level
+    byte-at-a-time append loop.  Overlapping matches (offset < match_len, the
+    RLE-style back-reference) still need replication, but that is expressed as
+    slice multiplication, again staying in C.  Output is identical to the
+    naive loop (verified against it on real LZ4/LZ4DUO hierarchy blocks).
     """
     i = 0
     n = len(src)
     out = bytearray()
+    ext = out.extend
 
     while i < n:
         token = src[i]
@@ -268,8 +277,9 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
 
         if i + literal_len > n:
             raise _FstFormatError("truncated LZ4 literal payload")
-        out.extend(src[i:i + literal_len])
-        i += literal_len
+        if literal_len:
+            ext(src[i:i + literal_len])
+            i += literal_len
 
         if i >= n:
             break
@@ -279,7 +289,8 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
             raise _FstFormatError("truncated LZ4 offset")
         offset = src[i] | (src[i + 1] << 8)
         i += 2
-        if offset == 0 or offset > len(out):
+        cur = len(out)
+        if offset == 0 or offset > cur:
             raise _FstFormatError(f"invalid LZ4 offset {offset}")
 
         # Match length
@@ -295,10 +306,21 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
                     break
         match_len += 4
 
-        # Copy match
-        start = len(out) - offset
-        for j in range(match_len):
-            out.append(out[start + j])
+        # Copy match.  start..cur is the back-reference window of length offset.
+        start = cur - offset
+        if offset >= match_len:
+            # Non-overlapping (the common case): one slice copy.
+            ext(out[start:start + match_len])
+        elif offset == 1:
+            # Single-byte run.
+            ext(out[start:cur] * match_len)
+        else:
+            # Overlapping back-reference: replicate the offset-length window.
+            window = out[start:cur]
+            full, rem = divmod(match_len, offset)
+            ext(window * full)
+            if rem:
+                ext(window[:rem])
 
     if expected_len is not None and len(out) != expected_len:
         raise _FstFormatError(

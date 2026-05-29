@@ -729,10 +729,19 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
 
     Matches the LZ4 block format used by libfst's hierarchy and VCDATA
     blocks. This is the raw block format, not framed .lz4.
+
+    The match copy is the hot loop.  LZ4 matches are overwhelmingly
+    non-overlapping (offset >= match_len), which can be satisfied with one
+    C-level ``bytearray.extend`` of a slice instead of a Python-level
+    byte-at-a-time append loop.  Overlapping matches (offset < match_len, the
+    RLE-style back-reference) still need replication, but that is expressed as
+    slice multiplication, again staying in C.  Output is identical to the
+    naive loop (verified against it on real LZ4/LZ4DUO hierarchy blocks).
     """
     i = 0
     n = len(src)
     out = bytearray()
+    ext = out.extend
 
     while i < n:
         token = src[i]
@@ -752,8 +761,9 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
 
         if i + literal_len > n:
             raise _FstFormatError("truncated LZ4 literal payload")
-        out.extend(src[i:i + literal_len])
-        i += literal_len
+        if literal_len:
+            ext(src[i:i + literal_len])
+            i += literal_len
 
         if i >= n:
             break
@@ -763,7 +773,8 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
             raise _FstFormatError("truncated LZ4 offset")
         offset = src[i] | (src[i + 1] << 8)
         i += 2
-        if offset == 0 or offset > len(out):
+        cur = len(out)
+        if offset == 0 or offset > cur:
             raise _FstFormatError(f"invalid LZ4 offset {offset}")
 
         # Match length
@@ -779,10 +790,21 @@ def lz4_decompress(src: bytes, expected_len: int | None = None) -> bytes:
                     break
         match_len += 4
 
-        # Copy match
-        start = len(out) - offset
-        for j in range(match_len):
-            out.append(out[start + j])
+        # Copy match.  start..cur is the back-reference window of length offset.
+        start = cur - offset
+        if offset >= match_len:
+            # Non-overlapping (the common case): one slice copy.
+            ext(out[start:start + match_len])
+        elif offset == 1:
+            # Single-byte run.
+            ext(out[start:cur] * match_len)
+        else:
+            # Overlapping back-reference: replicate the offset-length window.
+            window = out[start:cur]
+            full, rem = divmod(match_len, offset)
+            ext(window * full)
+            if rem:
+                ext(window[:rem])
 
     if expected_len is not None and len(out) != expected_len:
         raise _FstFormatError(
@@ -1190,6 +1212,21 @@ class _FstReader:
         active_attrs: list[FstAttrBegin] = []
         pending_misc: list[FstAttrBegin] = []
         pending_metadata = FstSignalMetadata()
+        # Shared immutable default, returned for every variable that carries no
+        # attributes at all.  FstSignalMetadata is frozen, so a single instance
+        # is safe to alias across thousands of FstVars.  On attribute-free
+        # traces (the common case for VCS/Verilator dumps -- measured 100% of
+        # 275 K vars on the 386 MB sample) this avoids constructing a fresh
+        # 13-field dataclass and six attribute tuples per variable.
+        #
+        # Invariant relied on by the var fast path below: every code path in
+        # add_pending_misc that mutates pending_metadata also appends to
+        # pending_misc, and the only other contributor to a var's metadata is
+        # active_attrs.  Hence "active_attrs empty AND pending_misc empty"
+        # implies the metadata is exactly the default -- so the var can reuse
+        # _DEFAULT_METADATA without building any tuples or calling
+        # _metadata_replace.
+        _DEFAULT_METADATA = FstSignalMetadata()
 
         def add_pending_misc(attr: FstAttrBegin) -> None:
             nonlocal pending_metadata
@@ -1298,6 +1335,17 @@ class _FstReader:
                     handle = alias
                     is_alias = True
                 full = name if not cur_scope else cur_scope + "." + name
+                if not active_attrs and not pending_misc:
+                    # Fast path: no attributes apply to this variable, so its
+                    # metadata is the shared default.  Skips six tuple builds
+                    # and a _metadata_replace dict copy per variable.
+                    metadata = _DEFAULT_METADATA
+                    self._attributes_by_handle[handle] = ()
+                    events.append(FstVar(
+                        tag, direction, name, length, handle, is_alias, full,
+                        0, 0, "", metadata,
+                    ))
+                    continue
                 active_tuple = tuple(active_attrs)
                 misc_tuple = tuple(pending_misc)
                 metadata = _metadata_replace(
@@ -1717,8 +1765,6 @@ class _FstReader:
         # is a drop-in replacement for the per-item read_varint64 prefix-sum
         # loop, producing identical output.
         times: list[int] = decode_varint_deltas(ucdata, tsec_nitems)
-        # Build O(1) lookup for cumulative time indices
-        self._time_to_index: dict[int, int] = {t: i for i, t in enumerate(times)}
         return times
 
     def _parse_chain_table(self, sect: _VcSection, payload: bytes) -> None:
