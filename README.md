@@ -148,7 +148,10 @@ modules/                  Source modules (edit here, _make.py builds the release
   vcd_parser.py             Part 6: VCDParser (syncs with VCD_ANALYZER upstream)
   fst_adapter.py            Part 7: FSTParser adapter
   cli.py                    Part 8: 7 commands + CLI entry
-verify/                   Cross-validation test suite (152 cases, 19 waveform pairs)
+verify/                   Test suites (573 cases, 19 waveform pairs):
+verify/                     test_cross_validate.py   — 145 VCD vs FST parity checks
+verify/                     test_scan_correctness.py — 152 white-box filtered scan tests
+verify/                     test_commands_extended.py — 276 extended cross-validation
 CHANGELOG.md              Release notes
 ```
 
@@ -158,17 +161,19 @@ CHANGELOG.md              Release notes
 # Generate waveform pairs (requires iverilog + vcd2fst in PATH)
 python verify/gen_waveforms.py
 
-# Run cross-validation suite (requires pytest)
-python -m pytest verify/ -v
+# Run the full test suite
+python _make.py && python -m pytest verify/test_cross_validate.py verify/test_scan_correctness.py verify/test_commands_extended.py -q && python _make.py --check
 ```
 
-The test suite compiles 19 Verilog/SystemVerilog designs (custom + PurePyFstlib
-fixtures + VCD_ANALYZER fixtures), simulates them with iverilog/vvp, converts
-to FST via vcd2fst, then runs every command on both formats and compares the
-JSON output.
+The test suite compiles 19 Verilog/SystemVerilog designs (custom +
+PurePyFstlib fixtures + VCD_ANALYZER fixtures), simulates them with
+iverilog/vvp, converts to FST via vcd2fst, then runs every command on both
+formats and compares the JSON output.  Two additional suites cover white-box
+filtered-scan correctness and extended cross-validation under many option
+combinations.
 
-**145 passed, 7 skipped, 0 failed.**  The 7 skipped are designs with zero time
-range or no 1-bit signals, which are design limitations, not bugs.
+**573 passed, 16 skipped, 0 failed.**  All skipped cases are design
+limitations (zero time range, no 1-bit signals), not bugs.
 
 ## Development workflow
 
