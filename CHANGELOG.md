@@ -3,7 +3,37 @@
 All notable changes to open_wave_analyzer.
 
 
-## [Unreleased]
+## [3.0.0] - 2026-05-29
+
+### Changed
+
+- Vectorized time-table varint decode: numpy-accelerated path for bulk
+  VCDATA time tables, with pure-Python fast path fallback.
+- Faster FST hierarchy parse: shared default metadata for attribute-free
+  variables, LZ4 decompression optimized with C-level slice copy, dropped
+  dead _time_to_index dict.
+- VCD chunked tokenizer: data section read in 4MB chunks split in C,
+  replacing per-line readline+split. List-based iter_events eliminates
+  per-token generator resume.
+- VCD one-line header fast path: common VCD declarations handled by
+  direct line parsing, avoiding per-token state machine.
+- FST C-level cstr scan: bytes.find-based null scan, deferred signal-name
+  index (never built for analysis commands).
+- Trim per-variable startup allocations: elided empty attributes dict
+  entries, lazy vars_by_handle alias list.
+- All previous Unreleased changes folded in (VCDATA lazy parsing,
+  section time-window skip, multi-process parallel parse, filtered
+  chain-table scan, bulk_parse for bounded dump, _summary_rows
+  baseline optimization, active_handles lazy, alias fallback hardening).
+
+### Added
+
+- verify/test_scan_correctness.py (152 white-box tests)
+- verify/test_commands_extended.py (276 extended cross-validation tests)
+
+573 passed, 16 skipped.
+
+
 
 ### Changed
 
