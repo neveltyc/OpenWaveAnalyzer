@@ -440,9 +440,13 @@ class _FstReader:
                 if not active_attrs and not pending_misc:
                     # Fast path: no attributes apply to this variable, so its
                     # metadata is the shared default.  Skips six tuple builds
-                    # and a _metadata_replace dict copy per variable.
+                    # and a _metadata_replace dict copy per variable.  The
+                    # empty _attributes_by_handle entry is also elided -- the
+                    # public attributes() accessor reads it via .get(h, ()), so
+                    # an absent key is indistinguishable from an empty tuple,
+                    # and not writing one saves 275 K dict insertions on the
+                    # 386 MB sample.
                     metadata = _DEFAULT_METADATA
-                    self._attributes_by_handle[handle] = ()
                     events.append(FstVar(
                         tag, direction, name, length, handle, is_alias, full,
                         0, 0, "", metadata,
@@ -536,13 +540,25 @@ class _FstReader:
     def _build_handle_map(self) -> None:
         """Build handle->FstVar lookup dict.
 
-        The first (non-alias) var for each handle is canonical.
-        Subsequent aliases are stored in _vars_by_handle.
+        The first (non-alias) var for each handle is canonical.  Only
+        _handle_to_var is built eagerly because the analysis path needs it for
+        per-handle var lookup.  The full alias lists (_vars_by_handle) feed
+        only the public vars_by_handle() accessor, so they are built lazily on
+        first use -- skipping a setdefault+append over every hierarchy event
+        (515 K on the 386 MB sample) at startup.
         """
+        handle_to_var = self._handle_to_var
         for e in self._hierarchy_events:
             if isinstance(e, FstVar):
-                if e.handle not in self._handle_to_var:
-                    self._handle_to_var[e.handle] = e
+                h = e.handle
+                if h not in handle_to_var:
+                    handle_to_var[h] = e
+
+    def _ensure_vars_by_handle(self) -> None:
+        if self._vars_by_handle:
+            return
+        for e in self._hierarchy_events:
+            if isinstance(e, FstVar):
                 self._vars_by_handle.setdefault(e.handle, []).append(e)
 
     def _build_signal_index(self) -> None:
@@ -1723,6 +1739,7 @@ class _FstReader:
 
     def vars_by_handle(self, handle: int) -> list['FstVar']:
         """Return all FstVar entries (canonical + aliases) for a handle."""
+        self._ensure_vars_by_handle()
         return self._vars_by_handle.get(handle, [])
 
     def scopes(self) -> list[FstScope]:
