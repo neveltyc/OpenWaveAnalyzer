@@ -16,6 +16,7 @@ out, so they can reach the private reader internals.
 
 import importlib.util
 import random
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,16 +31,29 @@ WAVEFORMS_DIR = VERIFY_DIR / 'waveforms'
 # ---------------------------------------------------------------------------
 
 _wa_module = None
+_WA_MODULE_NAME = 'wave_analyzer_under_test'
 
 
 def _load_wa():
     """Import open_wave_analyzer.py as a module (cached)."""
     global _wa_module
     if _wa_module is None:
-        spec = importlib.util.spec_from_file_location('wave_analyzer_under_test', SCRIPT)
+        spec = importlib.util.spec_from_file_location(_WA_MODULE_NAME, SCRIPT)
         mod = importlib.util.module_from_spec(spec)
-        mod.__name__ = 'wave_analyzer_under_test'
-        spec.loader.exec_module(mod)
+        mod.__name__ = _WA_MODULE_NAME
+        # Register in sys.modules *before* exec_module.  Under
+        # ``from __future__ import annotations`` all annotations are strings,
+        # and @dataclass resolves field annotations via
+        # ``sys.modules.get(cls.__module__).__dict__`` to detect KW_ONLY.  A
+        # module created by module_from_spec is not auto-registered, so without
+        # this line that lookup returns None and class creation fails with
+        # ``AttributeError: 'NoneType' object has no attribute '__dict__'``.
+        sys.modules[_WA_MODULE_NAME] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            sys.modules.pop(_WA_MODULE_NAME, None)
+            raise
         _wa_module = mod
     return _wa_module
 

@@ -65,7 +65,17 @@ Notes:
   "no match" result.
 """
 
-__version__ = '3.0.0'
+# PEP 563: make all annotations lazy strings so the PEP 604 union syntax used
+# throughout this file (e.g. ``bytes | bytearray | memoryview``,
+# ``tuple[str, int] | None``) is never evaluated at runtime.  Without this the
+# module fails to import on Python 3.9, where ``X | Y`` raises TypeError
+# outside of a string annotation.  This must remain the first statement after
+# the module docstring.  See verify/test_scan_correctness.py for the matching
+# loader fix that lets @dataclass resolve these string annotations when the
+# module is imported under a synthetic name.
+from __future__ import annotations
+
+__version__ = '3.0.1'
 
 import sys, os, re, math, json, struct
 import zlib as _zlib

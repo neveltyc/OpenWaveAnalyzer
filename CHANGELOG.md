@@ -3,6 +3,30 @@
 All notable changes to open_wave_analyzer.
 
 
+## [3.0.1] - 2026-05-29
+
+### Fixed
+
+- Restore Python 3.9 compatibility. The codebase uses PEP 604 union syntax
+  (e.g. `tuple[str, int] | None`, `bytes | bytearray | memoryview`) in
+  annotations, which raises `TypeError` at import time on Python 3.9 — most
+  visibly on the `@dataclass` field `source_stem: tuple[str, int] | None`.
+  Adding `from __future__ import annotations` (PEP 563) makes all annotations
+  lazy strings so they are never evaluated at runtime, which 3.9 supports.
+- Fix `verify/test_scan_correctness.py` so it remains compatible with the
+  future-import. The test imports the assembled file under a synthetic module
+  name via `spec_from_file_location` + `exec_module`. Under PEP 563,
+  `@dataclass` resolves its string field annotations through
+  `sys.modules[cls.__module__].__dict__` to detect `KW_ONLY`; a module built
+  by `module_from_spec` is not auto-registered, so the lookup returned `None`
+  and class creation failed. The loader now registers the module in
+  `sys.modules` before `exec_module` (and pops it on failure).
+
+Verified on CPython 3.9.19 and 3.12: the single file imports and runs, output
+is byte-for-byte identical across versions, and the full test suite passes on
+both. Minimum supported Python returns to 3.9; README badge reverted to 3.9+.
+
+
 ## [3.0.0] - 2026-05-29
 
 ### Changed
