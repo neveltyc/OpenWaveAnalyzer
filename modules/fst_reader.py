@@ -105,7 +105,15 @@ class _FstReader:
         self._attributes_by_handle: dict[int, tuple[FstAttrBegin, ...]] = {}
         self._parse_geometry_and_hierarchy()
         self._build_handle_map()
-        self._build_signal_index()
+        # Signal name indexes are only needed by the public name<->handle
+        # lookup API (signal_names / find_handle / names_for_handle / ...),
+        # which the CLI/adapter analysis path never touches.  Building three
+        # dicts over every variable cost ~1 s of startup on the 386 MB sample
+        # for nothing, so defer it until the first lookup.
+        self._signal_index_built = False
+        self._full_name_to_handles: dict[str, list[int]] = {}
+        self._short_name_to_handles: dict[str, list[int]] = {}
+        self._handle_to_full_names: dict[int, list[str]] = {}
         self._parse_vc_sections()
         self._build_section_time_index()
         self._parse_blackouts()
@@ -538,16 +546,28 @@ class _FstReader:
                 self._vars_by_handle.setdefault(e.handle, []).append(e)
 
     def _build_signal_index(self) -> None:
-        """Build name/handle indexes for random-access signal lookup."""
-        self._full_name_to_handles: dict[str, list[int]] = {}
-        self._short_name_to_handles: dict[str, list[int]] = {}
-        self._handle_to_full_names: dict[int, list[str]] = {}
+        """Build name/handle indexes for random-access signal lookup.
+
+        Lazy: invoked on first use by the public name<->handle lookup methods
+        (see _ensure_signal_index), not eagerly in __init__, because the
+        analysis commands resolve signals through their own tables.
+        """
+        if self._signal_index_built:
+            return
+        self._full_name_to_handles = {}
+        self._short_name_to_handles = {}
+        self._handle_to_full_names = {}
         for var in self.vars():
             self._full_name_to_handles.setdefault(var.full_name, []).append(var.handle)
             self._short_name_to_handles.setdefault(var.name, []).append(var.handle)
             names = self._handle_to_full_names.setdefault(var.handle, [])
             if var.full_name not in names:
                 names.append(var.full_name)
+        self._signal_index_built = True
+
+    def _ensure_signal_index(self) -> None:
+        if not self._signal_index_built:
+            self._build_signal_index()
 
     @staticmethod
     def _is_vc_block(b: FstBlock) -> bool:
@@ -1294,11 +1314,13 @@ class _FstReader:
     def signal_names(self, *, include_aliases: bool = True) -> list[str]:
         """Return full signal names known to the hierarchy index."""
         if include_aliases:
+            self._ensure_signal_index()
             return sorted(self._full_name_to_handles)
         return sorted(v.full_name for v in self._handle_to_var.values())
 
     def names_for_handle(self, handle: int) -> list[str]:
         """Return full hierarchy names associated with a handle."""
+        self._ensure_signal_index()
         return list(self._handle_to_full_names.get(int(handle), []))
 
     def find_handle(self, name: str, *, include_aliases: bool = True) -> int:
@@ -1309,6 +1331,7 @@ class _FstReader:
         wildcard/regex matching or when multiple aliases should be preserved.
         """
         if include_aliases:
+            self._ensure_signal_index()
             handles = self._full_name_to_handles.get(str(name), [])
         else:
             handles = [h for h, v in self._handle_to_var.items() if v.full_name == str(name)]
@@ -1327,6 +1350,7 @@ class _FstReader:
         ``unique=True`` aliases are collapsed to one handle value.
         """
         if include_aliases:
+            self._ensure_signal_index()
             items = self._full_name_to_handles.items()
         else:
             items = ((v.full_name, [h]) for h, v in self._handle_to_var.items())
@@ -2108,6 +2132,16 @@ def _file_type_name(value) -> str:
 
 
 def _read_cstr(buf: bytes | bytearray | memoryview, off: int) -> tuple[str, int]:
+    # Locate the NUL terminator with a single C-level scan instead of a
+    # per-byte Python loop.  bytes/bytearray expose .find; a memoryview does
+    # not, so fall back to the explicit scan for that (rare) case.  Hierarchy
+    # parsing calls this hundreds of thousands of times, so the C scan matters.
+    find = getattr(buf, "find", None)
+    if find is not None:
+        end = find(0, off)
+        if end < 0:
+            raise _FstFormatError("unterminated C string")
+        return bytes(buf[off:end]).decode("utf-8", errors="replace"), end + 1
     end = off
     n = len(buf)
     while end < n and buf[end] != 0:
@@ -2117,6 +2151,12 @@ def _read_cstr(buf: bytes | bytearray | memoryview, off: int) -> tuple[str, int]
     return bytes(buf[off:end]).decode("utf-8", errors="replace"), end + 1
 
 def _read_cstr_raw(buf: bytes | bytearray | memoryview, off: int) -> tuple[bytes, int]:
+    find = getattr(buf, "find", None)
+    if find is not None:
+        end = find(0, off)
+        if end < 0:
+            raise _FstFormatError("unterminated C string")
+        return bytes(buf[off:end]), end + 1
     end = off
     n = len(buf)
     while end < n and buf[end] != 0:
