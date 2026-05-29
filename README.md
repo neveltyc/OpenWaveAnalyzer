@@ -121,9 +121,6 @@ queries complete in 5&ndash;8 s while the equivalent VCD scan takes minutes.
 For interactive use, either format is fast enough that the difference is
 rarely the bottleneck compared to opening a GUI viewer.
 
-For detailed benchmarks across small, medium, and large datasets, see
-[todo/PERF_ANALYSIS_v2.0.1.md](todo/PERF_ANALYSIS_v2.0.1.md).
-
 ## JSON output
 
 Every command emits compact structured JSON under `--json`.  Agents and scripts
