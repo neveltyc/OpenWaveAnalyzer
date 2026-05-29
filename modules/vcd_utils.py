@@ -437,6 +437,113 @@ def _glob_lite_regex(pattern):
 _DECL_KEYWORDS = {'$timescale', '$scope', '$upscope', '$var',
                   '$comment', '$date', '$version', '$enddefinitions'}
 
+# Bracketed size/reference range, e.g. '[7:0]'.  Anchored so '[a:b]' rejects.
+_HEADER_RANGE_RE = re.compile(r'\[(\d+):(\d+)\]$')
+
+
+def _collect_bracket_tokens(tokens, i):
+    """Join a bracketed reference that free-format VCD may split across tokens.
+
+    Per IEEE 1364 free-format, a reference range can be split, e.g.
+    'data [7 : 0]' -> ['data', '[7', ':', '0]'].  Returns (joined, next_idx)
+    when tokens[i] opens a '[', else (None, i).  Module-level so the one-line
+    fast path and the generic token parser share one definition and cannot
+    drift apart.
+    """
+    if i >= len(tokens) or not tokens[i].startswith('['):
+        return None, i
+    parts = []
+    while i < len(tokens):
+        parts.append(tokens[i])
+        if ']' in tokens[i]:
+            return ''.join(parts), i + 1
+        i += 1
+    return None, i
+
+
+def _parse_var_tokens(body, scope_path):
+    """Parse the token body of a $var declaration (tokens between '$var' and
+    '$end').
+
+    Returns (sym, name, width, bit_str, scope_path, vtype), or None for a
+    malformed declaration that should be skipped.  Raises _VCDResourceError for
+    hostile widths.  Shared by both the one-line header fast path and the
+    generic multi-line token parser so var interpretation is defined once.
+    """
+    nbody = len(body)
+    if nbody < 4:
+        return None
+
+    # Fast path for the two overwhelmingly common shapes emitted by VCS,
+    # Verilator, Icarus, etc., where the size is a plain integer (not a split
+    # '[ msb : lsb ]') and the reference is at most one trailing '[..]' token:
+    #   4 tokens: vtype width sym name                  (scalar / packed bus)
+    #   5 tokens: vtype width sym name [range-or-bit]   (bus or bit-select)
+    # This avoids two _collect_bracket_tokens scans per variable on files that
+    # declare hundreds of thousands of them.  Any shape that does not match
+    # (bracketed size, split range, extra tokens) falls through to the general
+    # parser below, so behavior is unchanged for those.
+    if nbody <= 5:
+        b1 = body[1]
+        if not b1.startswith('['):
+            w = _safe_int_digits(b1)
+            if w is not None:
+                if w <= 0 or w > MAX_SIGNAL_WIDTH:
+                    raise _VCDResourceError(
+                        '$var width {} exceeds max {}; '
+                        'file may be corrupt or malicious'.format(w, MAX_SIGNAL_WIDTH))
+                vtype = body[0]
+                sym = body[2]
+                name = body[3]
+                if nbody == 4:
+                    return sym, name, w, None, scope_path, vtype
+                # nbody == 5: trailing reference token body[4].
+                ref = body[4]
+                if ref.startswith('[') and ref.endswith(']'):
+                    if w > 1:
+                        # Range folded into displayed name ('data[7:0]').
+                        return sym, name + ref, w, None, scope_path, vtype
+                    # 1-bit [N]: keep as bit_str for the bit-explosion heuristic.
+                    return sym, name, w, ref, scope_path, vtype
+                # Unexpected 5th token (e.g. split '[7 :'); fall through.
+
+    vtype = body[0]
+    size_expr, idx_after_size = _collect_bracket_tokens(body, 1)
+    if size_expr is not None:
+        m = _HEADER_RANGE_RE.match(size_expr)
+        if not m:
+            return None
+        msb = _safe_int_digits(m.group(1))
+        lsb = _safe_int_digits(m.group(2))
+        if msb is None or lsb is None:
+            return None
+        w = abs(msb - lsb) + 1
+        idx = idx_after_size
+    else:
+        w = _safe_int_digits(body[1])
+        if w is None:
+            return None
+        idx = 2
+    # Refuse pathological widths before they reach fmt_val (which would try to
+    # allocate pad bytes proportional to width).  Real signals never approach
+    # MAX_SIGNAL_WIDTH.
+    if w <= 0 or w > MAX_SIGNAL_WIDTH:
+        raise _VCDResourceError(
+            '$var width {} exceeds max {}; '
+            'file may be corrupt or malicious'.format(w, MAX_SIGNAL_WIDTH))
+    if len(body) <= idx + 1:
+        return None
+    sym, name = body[idx], body[idx + 1]
+    # A bracket after the name is a bit/range reference, possibly split across
+    # tokens.  For multi-bit refs with a range, fold it into the displayed name
+    # ('data[7:0]'); for a 1-bit ref with [N], keep bit_str for the
+    # bit-explosion heuristic.
+    bit_str, _idx_after_ref = _collect_bracket_tokens(body, idx + 2)
+    if bit_str is not None and w > 1:
+        name = name + bit_str
+        bit_str = None
+    return sym, name, w, bit_str, scope_path, vtype
+
 # Simulation keywords that wrap value_changes until $end. The keyword and $end
 # are pure markers — the wrapped value_changes are parsed normally.
 # Four-state VCD (18.2.3.9-12) + extended VCD (18.4.1 BNF).

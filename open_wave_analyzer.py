@@ -3792,6 +3792,113 @@ def _glob_lite_regex(pattern):
 _DECL_KEYWORDS = {'$timescale', '$scope', '$upscope', '$var',
                   '$comment', '$date', '$version', '$enddefinitions'}
 
+# Bracketed size/reference range, e.g. '[7:0]'.  Anchored so '[a:b]' rejects.
+_HEADER_RANGE_RE = re.compile(r'\[(\d+):(\d+)\]$')
+
+
+def _collect_bracket_tokens(tokens, i):
+    """Join a bracketed reference that free-format VCD may split across tokens.
+
+    Per IEEE 1364 free-format, a reference range can be split, e.g.
+    'data [7 : 0]' -> ['data', '[7', ':', '0]'].  Returns (joined, next_idx)
+    when tokens[i] opens a '[', else (None, i).  Module-level so the one-line
+    fast path and the generic token parser share one definition and cannot
+    drift apart.
+    """
+    if i >= len(tokens) or not tokens[i].startswith('['):
+        return None, i
+    parts = []
+    while i < len(tokens):
+        parts.append(tokens[i])
+        if ']' in tokens[i]:
+            return ''.join(parts), i + 1
+        i += 1
+    return None, i
+
+
+def _parse_var_tokens(body, scope_path):
+    """Parse the token body of a $var declaration (tokens between '$var' and
+    '$end').
+
+    Returns (sym, name, width, bit_str, scope_path, vtype), or None for a
+    malformed declaration that should be skipped.  Raises _VCDResourceError for
+    hostile widths.  Shared by both the one-line header fast path and the
+    generic multi-line token parser so var interpretation is defined once.
+    """
+    nbody = len(body)
+    if nbody < 4:
+        return None
+
+    # Fast path for the two overwhelmingly common shapes emitted by VCS,
+    # Verilator, Icarus, etc., where the size is a plain integer (not a split
+    # '[ msb : lsb ]') and the reference is at most one trailing '[..]' token:
+    #   4 tokens: vtype width sym name                  (scalar / packed bus)
+    #   5 tokens: vtype width sym name [range-or-bit]   (bus or bit-select)
+    # This avoids two _collect_bracket_tokens scans per variable on files that
+    # declare hundreds of thousands of them.  Any shape that does not match
+    # (bracketed size, split range, extra tokens) falls through to the general
+    # parser below, so behavior is unchanged for those.
+    if nbody <= 5:
+        b1 = body[1]
+        if not b1.startswith('['):
+            w = _safe_int_digits(b1)
+            if w is not None:
+                if w <= 0 or w > MAX_SIGNAL_WIDTH:
+                    raise _VCDResourceError(
+                        '$var width {} exceeds max {}; '
+                        'file may be corrupt or malicious'.format(w, MAX_SIGNAL_WIDTH))
+                vtype = body[0]
+                sym = body[2]
+                name = body[3]
+                if nbody == 4:
+                    return sym, name, w, None, scope_path, vtype
+                # nbody == 5: trailing reference token body[4].
+                ref = body[4]
+                if ref.startswith('[') and ref.endswith(']'):
+                    if w > 1:
+                        # Range folded into displayed name ('data[7:0]').
+                        return sym, name + ref, w, None, scope_path, vtype
+                    # 1-bit [N]: keep as bit_str for the bit-explosion heuristic.
+                    return sym, name, w, ref, scope_path, vtype
+                # Unexpected 5th token (e.g. split '[7 :'); fall through.
+
+    vtype = body[0]
+    size_expr, idx_after_size = _collect_bracket_tokens(body, 1)
+    if size_expr is not None:
+        m = _HEADER_RANGE_RE.match(size_expr)
+        if not m:
+            return None
+        msb = _safe_int_digits(m.group(1))
+        lsb = _safe_int_digits(m.group(2))
+        if msb is None or lsb is None:
+            return None
+        w = abs(msb - lsb) + 1
+        idx = idx_after_size
+    else:
+        w = _safe_int_digits(body[1])
+        if w is None:
+            return None
+        idx = 2
+    # Refuse pathological widths before they reach fmt_val (which would try to
+    # allocate pad bytes proportional to width).  Real signals never approach
+    # MAX_SIGNAL_WIDTH.
+    if w <= 0 or w > MAX_SIGNAL_WIDTH:
+        raise _VCDResourceError(
+            '$var width {} exceeds max {}; '
+            'file may be corrupt or malicious'.format(w, MAX_SIGNAL_WIDTH))
+    if len(body) <= idx + 1:
+        return None
+    sym, name = body[idx], body[idx + 1]
+    # A bracket after the name is a bit/range reference, possibly split across
+    # tokens.  For multi-bit refs with a range, fold it into the displayed name
+    # ('data[7:0]'); for a 1-bit ref with [N], keep bit_str for the
+    # bit-explosion heuristic.
+    bit_str, _idx_after_ref = _collect_bracket_tokens(body, idx + 2)
+    if bit_str is not None and w > 1:
+        name = name + bit_str
+        bit_str = None
+    return sym, name, w, bit_str, scope_path, vtype
+
 # Simulation keywords that wrap value_changes until $end. The keyword and $end
 # are pure markers — the wrapped value_changes are parsed normally.
 # Four-state VCD (18.2.3.9-12) + extended VCD (18.4.1 BNF).
@@ -3846,19 +3953,91 @@ class VCDParser:
         self._parse_header()
 
     def _parse_header(self):
-        """Token-based header parse. Sections may span multiple lines;
-        $end is the only terminator (IEEE 1364-2005 18.2.1)."""
+        """Parse VCD declarations and record where value changes begin.
+
+        Common generated VCDs put one complete declaration per physical line
+        ('$var wire 1 ! clk $end').  Those lines are handled by a direct fast
+        path that avoids the per-token state machine; VCS/Verdi/GTKWave files
+        can carry hundreds of thousands of $var records, so this materially
+        cuts startup time for every command.  Free-format and multi-line
+        declarations fall through to the tolerant token parser.  Both paths
+        feed the same _parse_var_tokens helper, so the parsed signal table is
+        identical regardless of which path a line takes (verified against the
+        token-only parser across fixtures and adversarial headers).
+        """
         scope = []
+        scope_path = ''
         raw_vars = []  # (sym, name, width, bit_idx_str, scope_path, vtype)
         current_kw = None
         body = []
         done = False
+        append_raw = raw_vars.append
+
+        def _append_var(body_tokens):
+            if len(raw_vars) >= MAX_VARS:
+                raise _VCDResourceError(
+                    'too many $var declarations: more than {}. '
+                    'Set VCD_ANALYZER_MAX_VARS to raise the limit.'.format(MAX_VARS))
+            rec = _parse_var_tokens(body_tokens, scope_path)
+            if rec is not None:
+                append_raw(rec)
 
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             while not done:
                 line = f.readline()
                 if not line:
                     break
+
+                # Fast path: one complete declaration on this line, with $end
+                # on the same line, and we are not mid-section. Anything that
+                # does not fit falls through to the generic token parser, so
+                # correctness never depends on the fast path matching.
+                if current_kw is None:
+                    stripped = line.strip()
+                    if stripped:
+                        if stripped.startswith('$var ') and stripped.endswith(' $end'):
+                            toks = stripped.split()
+                            if len(toks) >= 6 and toks[-1] == '$end':
+                                _append_var(toks[1:-1])
+                                continue
+                        elif stripped.startswith('$scope ') and stripped.endswith(' $end'):
+                            toks = stripped.split()
+                            if len(toks) >= 4 and toks[-1] == '$end':
+                                if len(scope) >= MAX_SCOPE_DEPTH:
+                                    raise _VCDResourceError(
+                                        '$scope nesting depth exceeds {}; '
+                                        'file may be corrupt or malicious'.format(MAX_SCOPE_DEPTH))
+                                scope.append(toks[2])
+                                scope_path = '.'.join(scope)
+                                continue
+                        elif stripped == '$upscope $end':
+                            if scope:
+                                scope.pop()
+                                scope_path = '.'.join(scope)
+                            continue
+                        elif stripped.startswith('$timescale ') and stripped.endswith(' $end'):
+                            toks = stripped.split()
+                            ts_body = ' '.join(toks[1:-1])
+                            self.ts_str = '$timescale ' + ts_body + ' $end'
+                            self.ts_sec = _parse_timescale(ts_body)
+                            continue
+                        elif (stripped.startswith('$date ') or stripped.startswith('$version ') or
+                              stripped.startswith('$comment ')) and stripped.endswith(' $end'):
+                            toks = stripped.split()
+                            kw = toks[0]
+                            text = ' '.join(toks[1:-1])
+                            if kw == '$date':
+                                self.date = text
+                            elif kw == '$version':
+                                self.version = text
+                            elif len(self.comments) < MAX_COMMENTS:
+                                self.comments.append(text)
+                            continue
+                        # $enddefinitions is intentionally NOT fast-pathed:
+                        # data tokens may share its line and the generic loop
+                        # below already buffers them into _initial_tokens with
+                        # the correct fail-fast cap.
+
                 for tok in line.split():
                     if done:
                         # Buffer tokens that share the same line as
@@ -3866,9 +4045,6 @@ class VCDParser:
                         # (value_changes, timestamps), so they MUST NOT
                         # be silently dropped — that would corrupt the
                         # waveform without the user noticing. Fail-fast.
-                        # Normal VCDs have at most a handful of tokens
-                        # on this line; 131072 is comfortably above any
-                        # legitimate use.
                         if len(self._initial_tokens) >= MAX_INITIAL_TOKENS:
                             raise _VCDResourceError(
                                 'too many data tokens on the same line as '
@@ -3895,83 +4071,13 @@ class VCDParser:
                                     '$scope nesting depth exceeds {}; '
                                     'file may be corrupt or malicious'.format(MAX_SCOPE_DEPTH))
                             scope.append(body[1])
+                            scope_path = '.'.join(scope)
                         elif current_kw == '$upscope':
                             if scope:
                                 scope.pop()
-                        elif current_kw == '$var' and len(body) >= 4:
-                            vtype = body[0]
-
-                            def _collect_bracket(tokens, i):
-                                if i >= len(tokens) or not tokens[i].startswith('['):
-                                    return None, i
-                                parts = []
-                                while i < len(tokens):
-                                    parts.append(tokens[i])
-                                    if ']' in tokens[i]:
-                                        return ''.join(parts), i + 1
-                                    i += 1
-                                return None, i
-
-                            size_expr, idx_after_size = _collect_bracket(body, 1)
-                            if size_expr is not None:
-                                m = re.match(r'\[(\d+):(\d+)\]$', size_expr)
-                                if not m:
-                                    current_kw = None
-                                    continue
-                                msb = _safe_int_digits(m.group(1))
-                                lsb = _safe_int_digits(m.group(2))
-                                if msb is None or lsb is None:
-                                    # Overlong or malformed digits — skip
-                                    # this $var rather than abort, since
-                                    # the rest of the header may still be
-                                    # useful.
-                                    current_kw = None
-                                    continue
-                                w = abs(msb - lsb) + 1
-                                idx = idx_after_size
-                            else:
-                                w = _safe_int_digits(body[1])
-                                if w is None:
-                                    current_kw = None
-                                    continue
-                                idx = 2
-                            # Hazard 1 mitigation: refuse pathological widths
-                            # before they reach fmt_val (which would try to
-                            # allocate `pad * (width - len(value))` bytes).
-                            # Real signals never approach MAX_SIGNAL_WIDTH.
-                            if w <= 0 or w > MAX_SIGNAL_WIDTH:
-                                raise _VCDResourceError(
-                                    '$var width {} exceeds max {}; '
-                                    'file may be corrupt or malicious'.format(
-                                        w, MAX_SIGNAL_WIDTH))
-                            if len(body) <= idx + 1:
-                                current_kw = None
-                                continue
-                            sym, name = body[idx], body[idx + 1]
-
-                            # Per IEEE 1364 free-format, the bracket reference
-                            # range can be split into several tokens, e.g.
-                            # 'data [7 : 0]' → ['data', '[7', ':', '0]'].
-                            bit_str, _idx_after_ref = _collect_bracket(body, idx + 2)
-                            # Per IEEE 1364-2005 18.2.3.7 reference syntax:
-                            #   identifier [bit_select_index]      → single bit
-                            #   identifier [msb_index : lsb_index] → range
-                            # For multi-bit refs with a range, fold it into
-                            # the name so the displayed path is 'data[7:0]'.
-                            # For w==1 with [N], keep bit_str separate for
-                            # the bit-explosion heuristic below.
-                            if bit_str is not None and w > 1:
-                                name = name + bit_str
-                                bit_str = None
-                            # Resource cap: refuse to allocate unbounded memory
-                            # for malicious VCDs declaring millions of $var.
-                            # Default 500k is ~25x larger than typical QuestaSim
-                            # files; tune via VCD_ANALYZER_MAX_VARS env var.
-                            if len(raw_vars) >= MAX_VARS:
-                                raise _VCDResourceError(
-                                    'too many $var declarations: more than {}. '
-                                    'Set VCD_ANALYZER_MAX_VARS to raise the limit.'.format(MAX_VARS))
-                            raw_vars.append((sym, name, w, bit_str, '.'.join(scope), vtype))
+                                scope_path = '.'.join(scope)
+                        elif current_kw == '$var':
+                            _append_var(body)
                         elif current_kw == '$enddefinitions':
                             done = True
                         elif current_kw == '$date':
@@ -3983,9 +4089,7 @@ class VCDParser:
                         elif current_kw == '$comment':
                             # Per 18.2.3.1, $comment may appear multiple
                             # times. Silent drop after the cap is safe:
-                            # comments are metadata, not data — losing
-                            # the 1025th comment only affects what
-                            # `info --verbose` prints, never the waveform.
+                            # comments are metadata, not data.
                             if len(self.comments) < MAX_COMMENTS:
                                 self.comments.append(' '.join(body))
                         current_kw = None
@@ -3994,12 +4098,7 @@ class VCDParser:
                         # truncates oversized $comment / $date / $version
                         # bodies — metadata. $var bodies are 4-8 tokens,
                         # $scope is 2, $timescale is 2; none come close
-                        # to the cap. Silent drop is safe because:
-                        #   - the $end token still closes the section
-                        #     correctly (we still see it in the outer
-                        #     loop, we just stop appending to body)
-                        #   - dropped tokens never become part of any
-                        #     value_change interpretation
+                        # to the cap.
                         if len(body) < MAX_HEADER_BODY_TOKENS:
                             body.append(tok)
             self._data_offset = f.tell()
