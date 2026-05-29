@@ -11,7 +11,6 @@
   <img alt="Version" src="https://img.shields.io/badge/version-3.0.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-145%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -104,25 +103,26 @@ Run `python open_wave_analyzer.py --help` for the full reference.
 
 ## Performance
 
-Measured on a 12 MB VCD waveform and its FST equivalent (0.87 MB, 14&times;
-smaller).  All tests run with a single-core Python 3.14 on Windows x64, no
-warmup.
+Measured on a 17.1 MB VCD waveform and its FST equivalent (1.6 MB, 10.7&times;
+smaller).  Python 3.14 on Windows x64, single-core, no warmup.
 
-| Command | VCD (12 MB) | FST (0.87 MB) | Ratio |
+| Command | VCD (17 MB) | FST (1.6 MB) | Notes |
 |:--------|------------:|--------------:|:------|
-| `info` | 1.63 s | 0.20 s | FST 8&times; faster |
-| `summary` | 3.16 s | 4.80 s | FST 1.5&times; slower |
-| `dump` | 8.48 s | 10.60 s | FST 1.25&times; slower |
+| `info` | 1.46 s | 3.30 s | header-only, FST hierarchy init dominates |
+| `summary --filter <sig>` | 1.58 s | 2.99 s | single-signal full-window stats |
+| `dump --filter <sig> --limit 3` | 1.57 s | 3.21 s | quick peek at a signal |
+| `dump --filter <sig> --limit 0` | 1.57 s | 3.19 s | full filtered scan |
+| `dump --limit 10` (no filter) | 1.82 s | 4.11 s | first 10 events, all signals |
 
-`info` is near-instant on FST because the header does not require scanning the
-value-change data.  `dump` and `summary` are slower on FST because the
-pure-Python LZ4/FastLZ decompression path is not as fast as reading plain-text
-VCD tokens.  The trade-off: **FST files are 14&times; smaller, at the cost of
-~25% more parse time for full-scan commands.**
+On this 17 MB file, VCD finishes under 2 s for nearly every command.  FST
+spends ~3 s in hierarchy initialisation, but the file is **10.7&times;
+smaller** and the gap shrinks as traces grow: on a 368 MB FST, filtered
+queries complete in 5&ndash;8 s while the equivalent VCD scan takes minutes.
+For interactive use, either format is fast enough that the difference is
+rarely the bottleneck compared to opening a GUI viewer.
 
-Future work (mmap-backed reading, optional C-extension decompression) can close
-this gap.  For interactive use, the time difference is rarely the bottleneck
-compared to opening a GUI viewer.
+For detailed benchmarks across small, medium, and large datasets, see
+[todo/PERF_ANALYSIS_v2.0.1.md](todo/PERF_ANALYSIS_v2.0.1.md).
 
 ## JSON output
 
