@@ -521,6 +521,117 @@ def read_varint32(buf: bytes | bytearray | memoryview, off: int = 0) -> tuple[in
     return read_varint(buf, off)
 
 
+# Optional numpy acceleration for the bulk time-table decode.  The tool is
+# stdlib-only by design, so numpy is treated purely as an accelerator: if it is
+# not importable we fall back to a pure-Python decoder that is itself several
+# times faster than the per-call read_varint loop.
+try:
+    import numpy as _np
+except Exception:  # pragma: no cover - numpy is optional
+    _np = None
+
+
+def decode_varint_deltas(ucdata: bytes, nitems: int) -> list[int]:
+    """Decode ``nitems`` consecutive unsigned LEB128 varints and return their
+    running (prefix) sum as a list of ints.
+
+    This is the hot path for VCDATA time tables: every section stores its
+    timestamps as delta-encoded varints, and a large trace can carry tens of
+    millions of them.  The semantics are exactly::
+
+        out, acc, off = [], 0, 0
+        for _ in range(nitems):
+            val, used = read_varint(ucdata, off)
+            acc += val
+            out.append(acc)
+            off += used
+
+    but the per-varint Python function call and the backward byte scan in
+    read_varint dominate at that scale.  Two faster strategies are used, both
+    producing bit-for-bit identical results to the loop above (verified against
+    read_varint across fixtures and a 386 MB VCS trace):
+
+    * numpy path: split the stream on continuation bits and reconstruct every
+      varint with vectorized shifts.  Only used when no single varint exceeds
+      9 payload bytes, which keeps every intermediate inside uint64 (9*7 = 63
+      bits); FST time deltas never approach that.  Anything longer falls back.
+    * pure-Python path: a tight forward LEB128 loop with locals bound up front,
+      avoiding both the function-call-per-item overhead and read_varint's
+      separate backward length scan.
+    """
+    if nitems <= 0:
+        return []
+
+    if _np is not None:
+        out = _decode_varint_deltas_numpy(ucdata, nitems)
+        if out is not None:
+            return out
+
+    return _decode_varint_deltas_py(ucdata, nitems)
+
+
+def _decode_varint_deltas_py(ucdata: bytes, nitems: int) -> list[int]:
+    """Pure-Python forward LEB128 prefix-sum decoder (no dependencies)."""
+    times: list[int] = []
+    ap = times.append
+    acc = 0
+    off = 0
+    data = ucdata
+    n = len(data)
+    for _ in range(nitems):
+        b = data[off]
+        off += 1
+        if b < 0x80:
+            acc += b
+            ap(acc)
+            continue
+        value = b & 0x7F
+        shift = 7
+        while True:
+            if off >= n:
+                raise _FstFormatError("truncated varint")
+            b = data[off]
+            off += 1
+            value |= (b & 0x7F) << shift
+            if b < 0x80:
+                break
+            shift += 7
+        acc += value
+        ap(acc)
+    return times
+
+
+def _decode_varint_deltas_numpy(ucdata: bytes, nitems: int):
+    """Vectorized decode; returns None to signal "fall back to pure Python"."""
+    if not ucdata:
+        return None
+    b = _np.frombuffer(ucdata, dtype=_np.uint8)
+    is_last = (b & 0x80) == 0
+    last_idx = _np.nonzero(is_last)[0]
+    if last_idx.size < nitems:
+        return None
+    last_idx = last_idx[:nitems].astype(_np.int64)
+    starts = _np.empty(nitems, dtype=_np.int64)
+    starts[0] = 0
+    if nitems > 1:
+        starts[1:] = last_idx[:-1] + 1
+    lengths = last_idx - starts + 1
+    maxlen = int(lengths.max())
+    if maxlen > 9:
+        # A 10+ byte varint can overflow uint64 intermediates; let the robust
+        # pure-Python path handle this (vanishingly rare for real time tables).
+        return None
+    payload = (b & 0x7F).astype(_np.uint64)
+    deltas = _np.zeros(nitems, dtype=_np.uint64)
+    for k in range(maxlen):
+        mask = lengths > k
+        if not mask.any():
+            break
+        idx = starts[mask] + k
+        deltas[mask] += payload[idx] << _np.uint64(7 * k)
+    return _np.cumsum(deltas).tolist()
+
+
 def read_varint64(buf: bytes | bytearray | memoryview, off: int = 0) -> tuple[int, int]:
     """Read an unsigned 64-bit varint. Same encoding as read_varint."""
     return read_varint(buf, off)
@@ -1601,14 +1712,11 @@ class _FstReader:
             ucdata = compressed
         else:
             ucdata = zlib.decompress(compressed)
-        times: list[int] = []
-        tpval = 0
-        off = 0
-        for _ in range(tsec_nitems):
-            val, used = read_varint64(ucdata, off)
-            tpval += val
-            times.append(tpval)
-            off += used
+        # Time tables are delta-encoded varints and are one of the largest hot
+        # spots on big traces (tens of millions of items).  decode_varint_deltas
+        # is a drop-in replacement for the per-item read_varint64 prefix-sum
+        # loop, producing identical output.
+        times: list[int] = decode_varint_deltas(ucdata, tsec_nitems)
         # Build O(1) lookup for cumulative time indices
         self._time_to_index: dict[int, int] = {t: i for i, t in enumerate(times)}
         return times

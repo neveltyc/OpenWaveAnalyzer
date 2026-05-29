@@ -828,14 +828,11 @@ class _FstReader:
             ucdata = compressed
         else:
             ucdata = zlib.decompress(compressed)
-        times: list[int] = []
-        tpval = 0
-        off = 0
-        for _ in range(tsec_nitems):
-            val, used = read_varint64(ucdata, off)
-            tpval += val
-            times.append(tpval)
-            off += used
+        # Time tables are delta-encoded varints and are one of the largest hot
+        # spots on big traces (tens of millions of items).  decode_varint_deltas
+        # is a drop-in replacement for the per-item read_varint64 prefix-sum
+        # loop, producing identical output.
+        times: list[int] = decode_varint_deltas(ucdata, tsec_nitems)
         # Build O(1) lookup for cumulative time indices
         self._time_to_index: dict[int, int] = {t: i for i, t in enumerate(times)}
         return times
