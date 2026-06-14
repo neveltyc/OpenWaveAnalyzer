@@ -3,6 +3,71 @@
 All notable changes to open_wave_analyzer.
 
 
+## [4.0.0] - 2026-06-14
+
+Major version: introduces an optional cross-platform value backend.  The native
+pure-Python reader remains the default and the only hard requirement, so the
+single-file, zero-dependency story is unchanged for users who install nothing.
+
+### Added
+
+- **pywellen hybrid value backend.**  When the optional
+  [`pywellen`](https://pypi.org/project/pywellen/) package (Python binding for
+  the Rust [`wellen`](https://github.com/ekiwi/wellen) library) is installed,
+  the tool reads value data through it while still parsing the hierarchy with
+  the native reader.  This keeps file-declared bus ranges (`[15:8]`), split bus
+  slices, arrays, and aliases exactly as before, while speeding up full dumps
+  and, especially, time-windowed queries (`dump --begin/--end`, `snapshot`,
+  `compare`) on large traces.  Works on Linux and macOS (pywellen ships no
+  Windows wheel; the native reader covers Windows).
+- `OWA_FORCE_NATIVE=1` to always use the native reader, and
+  `OWA_PYWELLEN_ALLOW_ANY=1` to accept any installed pywellen version (a pinned
+  version is otherwise expected; a mismatch falls back to native).
+- `--version` now prints the active value backend (native vs pywellen hybrid).
+- `verify/test_pywellen_backend.py`: a self-contained suite (handcrafted VCD
+  fixtures, no simulator needed) covering backend activation, native-vs-hybrid
+  model and value parity, the bus-slice feature, IEEE 1364 value types (4-state
+  `x`/`z`, mixed, real, event, signed), same-timestamp coalescing, the
+  empty-signal guard, GHW rejection, error-handling parity, and VCD↔FST
+  consistency (via `vcd2fst` when available).  Skips when pywellen is absent.
+
+### Changed
+
+- The value iterator dispatches by intent: unbounded scans collect every
+  selected signal and sort once by time (faster than a lazy k-way merge over
+  thousands of per-signal streams, since extraction runs in Rust), while limited
+  scans keep the lazy merge so `--limit` can stop early.
+- GHW files (GHDL native format) are rejected explicitly, by `.ghw` extension or
+  the `GHDLwave\n` magic, with a clear error on both backends.  GHW was never
+  supported; it now fails fast instead of being misparsed.
+
+### Behavior changes (hybrid backend only)
+
+These follow from `wellen`'s value model and apply when pywellen is active; set
+`OWA_FORCE_NATIVE=1` for the native reader's previous behavior:
+
+- Only real value *transitions* are reported — redundant same-value writes in
+  the source file are coalesced.  This lowers change counts in `summary` and row
+  counts in `dump` for files that contain such writes.
+- Multiple writes within a single timestamp collapse to the settled (last)
+  value, so a same-time glitch (e.g. `z` then a driven value) is reported once.
+- The relative order of events sharing a timestamp may differ from the native
+  reader (values are identical; tests normalize by sorting on `(time, path)`).
+- Enum / VHDL `U`/`X`-style values that the native reader does not decode are
+  read and shown by the hybrid backend.
+
+### Fixed
+
+- Clean error instead of a Python traceback for VCD files that exceed the
+  `$var` limit.  `_VCDResourceError` was defined twice — an early alias to
+  `_WaveResourceError` followed by an unrelated `RuntimeError` subclass that
+  shadowed it — so `main()`'s `except _WaveResourceError` never caught it, and
+  oversized files surfaced a traceback (the class docstring even claimed
+  otherwise).  Removed the dead alias and made `_VCDResourceError` a subclass of
+  `_WaveResourceError`; oversized VCDs now report a clean CLI error on both
+  backends.
+
+
 ## [3.0.1] - 2026-05-29
 
 ### Fixed

@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.0.1-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-4.0.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -60,7 +60,8 @@ python open_wave_analyzer.py summary sim.vcd --filter dll_*
 
 ## Install
 
-Single file, no dependencies, Python 3.9+.
+Single file, no required dependencies, Python 3.9+.  (An optional accelerator is
+described under [Value backend](#value-backend).)
 
 ```bash
 # Download the release artifact
@@ -72,6 +73,56 @@ python open_wave_analyzer.py --version
 
 No pip, no venv, no PyPI.  Works anywhere curl and Python 3.9+ are available
 &mdash; CI containers, EDA servers, Docker builds, agent toolchains.
+
+`--version` also prints the active value backend.  The pure-Python reader is the
+default and needs nothing installed; an optional accelerator is described in
+[Value backend](#value-backend) below.
+
+## Value backend
+
+By default OpenWaveAnalyzer reads value data with its built-in pure-Python
+reader &mdash; zero dependencies, every platform.  If the optional
+[`pywellen`](https://pypi.org/project/pywellen/) package (the Python binding for
+the Rust [`wellen`](https://github.com/ekiwi/wellen) waveform library) is
+installed, the tool automatically switches to a **hybrid** backend:
+
+- the **hierarchy** (scopes, signal names, bus ranges like `[15:8]`, split bus
+  slices, arrays, aliases) is still parsed by the native reader, so paths and
+  ranges are exactly what the file declares; and
+- the **value body** is read through `pywellen`, which speeds up full dumps and
+  makes time-windowed queries (`dump --begin/--end`, `snapshot`, `compare`)
+  noticeably faster on large traces.
+
+```bash
+pip install pywellen      # optional; enables the hybrid backend
+python open_wave_analyzer.py --version
+#   open_wave_analyzer 4.0.0
+#   value backend: pywellen 0.25.5 (hybrid -- native hierarchy + pywellen values)
+```
+
+The backend is transparent &mdash; the same seven commands and the same
+`--json` shapes work either way. Control it with environment variables:
+
+| Variable | Effect |
+|:---------|:-------|
+| `OWA_FORCE_NATIVE=1` | Always use the pure-Python reader, even if `pywellen` is installed |
+| `OWA_PYWELLEN_ALLOW_ANY=1` | Accept any installed `pywellen` version (otherwise a pinned version is expected, and a mismatch falls back to native) |
+
+If `pywellen` is missing, version-mismatched, or errors on a file, the tool
+silently falls back to the native reader, so it always works.
+
+**Notes on equivalence.** The two backends agree on the signal model and on
+values, but a few differences are expected and intentional: `wellen` reports
+only real value *transitions*, so redundant same-value writes present in a
+source file are coalesced (this lowers change counts in `summary` and row
+counts in `dump` for such files); multiple writes within a single timestamp are
+reduced to the settled value; the relative order of events that share a
+timestamp may differ; and `pywellen` can read enum / VHDL `U`/`X` style values
+that the native reader does not. Use `OWA_FORCE_NATIVE=1` when you need the
+native reader's every-record behavior.
+
+> GHW (GHDL's native waveform format) is **not** supported by either backend and
+> is rejected with a clear error; convert it to VCD or FST first.
 
 ## Supported formats
 
@@ -143,12 +194,13 @@ modules/                  Source modules (edit here, _make.py builds the release
   fst_reader.py             Part 4: _FstReader (syncs with PurePyFstlib upstream)
   vcd_utils.py              Part 5: Timescale, filter, value helpers
   vcd_parser.py             Part 6: VCDParser (syncs with VCD_ANALYZER upstream)
-  fst_adapter.py            Part 7: FSTParser adapter
+  fst_adapter.py            Part 7: FSTParser adapter + pywellen hybrid backend
   cli.py                    Part 8: 7 commands + CLI entry
-verify/                   Test suites (573 cases, 19 waveform pairs):
-verify/                     test_cross_validate.py   — 145 VCD vs FST parity checks
-verify/                     test_scan_correctness.py — 152 white-box filtered scan tests
-verify/                     test_commands_extended.py — 276 extended cross-validation
+verify/                   Test suites:
+  test_cross_validate.py      VCD vs FST parity checks
+  test_scan_correctness.py    white-box filtered scan tests
+  test_commands_extended.py   extended cross-validation
+  test_pywellen_backend.py    pywellen hybrid backend (skips without pywellen)
 CHANGELOG.md              Release notes
 ```
 
@@ -159,18 +211,21 @@ CHANGELOG.md              Release notes
 python verify/gen_waveforms.py
 
 # Run the full test suite
-python _make.py && python -m pytest verify/test_cross_validate.py verify/test_scan_correctness.py verify/test_commands_extended.py -q && python _make.py --check
+python _make.py && python -m pytest verify/ -q && python _make.py --check
 ```
 
-The test suite compiles 19 Verilog/SystemVerilog designs (custom +
-PurePyFstlib fixtures + VCD_ANALYZER fixtures), simulates them with
+The test suite compiles Verilog/SystemVerilog designs, simulates them with
 iverilog/vvp, converts to FST via vcd2fst, then runs every command on both
-formats and compares the JSON output.  Two additional suites cover white-box
+formats and compares the JSON output.  Additional suites cover white-box
 filtered-scan correctness and extended cross-validation under many option
 combinations.
 
-**573 passed, 16 skipped, 0 failed.**  All skipped cases are design
-limitations (zero time range, no 1-bit signals), not bugs.
+A separate `test_pywellen_backend.py` exercises the hybrid value backend: it
+runs the CLI with the backend active and with `OWA_FORCE_NATIVE=1` and asserts
+they agree on the model and values for clean fixtures, then covers the bus-slice
+feature, IEEE 1364 value types (4-state `x`/`z`, mixed, real, event, signed),
+same-timestamp coalescing, GHW rejection, error-handling parity, and VCD&harr;FST
+consistency.  It skips automatically when `pywellen` is not installed.
 
 ## Development workflow
 
