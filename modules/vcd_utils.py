@@ -5,7 +5,6 @@
 class _WaveResourceError(RuntimeError):
     pass
 
-_VCDResourceError = _WaveResourceError
 
 # -- Time utilities ----------------------------------------------------------
 
@@ -130,9 +129,10 @@ class _ConditionParseError(ValueError):
     """Raised when search --condition / --show / --changed is invalid."""
 
 
-class _VCDResourceError(RuntimeError):
+class _VCDResourceError(_WaveResourceError):
     """Raised when a VCD input exceeds configured resource limits.
-    Surfaced in main() as a CLI error, no Python traceback."""
+    Surfaced in main() as a CLI error (caught via _WaveResourceError), no
+    Python traceback."""
 
 
 def _check_time_range(ticks, original):

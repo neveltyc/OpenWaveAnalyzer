@@ -624,6 +624,18 @@ def _add_common(sp):
                     help='show extra fields; if --limit is omitted, disables truncation')
 
 
+def _backend_status():
+    """One-line description of the active value backend, for --version."""
+    try:
+        if pywellen_available():
+            ver = _pywellen_installed_version() or '?'
+            return ('value backend: pywellen {} '
+                    '(hybrid -- native hierarchy + pywellen values)'.format(ver))
+    except Exception:
+        pass
+    return 'value backend: native pure-Python reader'
+
+
 def main():
     p = argparse.ArgumentParser(
         prog='open_wave_analyzer',
@@ -635,7 +647,8 @@ def main():
                    help='max rows/records to emit; default 200; 0 = unlimited; streaming commands stop after the first unshown result')
     p.add_argument('--verbose', action='store_true',
                    help='show extra fields; if --limit is omitted, disables truncation')
-    p.add_argument('--version', action='version', version='%(prog)s ' + __version__)
+    p.add_argument('--version', action='version',
+                   version='%(prog)s ' + __version__ + '\n' + _backend_status())
     sub = p.add_subparsers(dest='cmd', metavar='<command>')
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')

@@ -75,7 +75,7 @@ Notes:
 # module is imported under a synthetic name.
 from __future__ import annotations
 
-__version__ = '3.0.1'
+__version__ = '4.0.0'
 
 import sys, os, re, math, json, struct
 import zlib as _zlib
