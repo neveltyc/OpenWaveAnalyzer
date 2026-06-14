@@ -624,58 +624,10 @@ def _add_common(sp):
                     help='show extra fields; if --limit is omitted, disables truncation')
 
 
-def _dependency_status_banner():
-    """Build the optional-dependency status shown ONLY in --help.
-
-    Reports whether the optional accelerators (pylibfst, numpy) are installed.
-    When one is missing, prominently warns that the tool falls back to a slower
-    path and gives the exact pip command to install it.  Returns '' when both
-    are present (nothing to nag about).
-    """
-    lines = []
-
-    pylibfst_ok = _probe_pylibfst() is not None
-    numpy_ok = _np is not None
-    forced_native = _force_native()
-
-    if pylibfst_ok and numpy_ok and not forced_native:
-        return ''  # fully accelerated; stay quiet
-
-    lines.append('optional acceleration:')
-
-    if pylibfst_ok:
-        if forced_native:
-            lines.append('  [native forced] pylibfst is installed but disabled '
-                         'by OWA_FST_FORCE_NATIVE; using the pure-Python FST reader.')
-        else:
-            lines.append('  [ok]   pylibfst  : FST reads use the fast GTKWave backend')
-    else:
-        lines.append('  [SLOW] pylibfst  : NOT installed - FST reads fall back to the')
-        lines.append('                     pure-Python reader, which is much slower on')
-        lines.append('                     large traces. Install it for a big speedup:')
-        lines.append('                         pip install pylibfst')
-
-    if numpy_ok:
-        lines.append('  [ok]   numpy     : FST time-table decode is vectorized')
-    else:
-        lines.append('  [SLOW] numpy     : NOT installed - FST time-table decode falls')
-        lines.append('                     back to pure Python (slower on large traces).')
-        lines.append('                     Install it for a speedup:')
-        lines.append('                         pip install numpy')
-
-    return '\n'.join(lines)
-
-
-def _help_epilog():
-    banner = _dependency_status_banner()
-    return banner if banner else None
-
-
 def main():
     p = argparse.ArgumentParser(
         prog='open_wave_analyzer',
         description=__doc__,
-        epilog=_help_epilog(),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--json', action='store_true',
                    help='output compact structured JSON instead of text')

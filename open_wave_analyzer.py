@@ -75,7 +75,7 @@ Notes:
 # module is imported under a synthetic name.
 from __future__ import annotations
 
-__version__ = '3.1.0'
+__version__ = '3.0.1'
 
 import sys, os, re, math, json, struct
 import zlib as _zlib
@@ -5627,271 +5627,23 @@ class FSTParser:
 _FST_MAGIC = bytes([FST_BL_HDR])
 
 
-# ==========================================================================
-# Optional pylibfst backend
-# ==========================================================================
-# pylibfst is a cffi binding over GTKWave's reference fstapi (the same C reader
-# behind fst2vcd).  When installed it is dramatically faster than the pure-
-# Python reader on filtered, point, time-range, and hierarchy queries, and
-# competitive-to-faster on full scans, while producing byte-identical output
-# (validated against the native reader across all fixtures).  It is an OPTIONAL
-# accelerator: the tool stays single-file and dependency-free, and the native
-# reader remains the default when pylibfst is absent or when the user forces it
-# off via OWA_FST_FORCE_NATIVE.
-
-_PYLIBFST = None
-_PYLIBFST_PROBED = False
-
-
-def _probe_pylibfst():
-    """Import pylibfst once; cache the module or None.  Never raises."""
-    global _PYLIBFST, _PYLIBFST_PROBED
-    if _PYLIBFST_PROBED:
-        return _PYLIBFST
-    _PYLIBFST_PROBED = True
-    try:
-        import pylibfst as _pl
-        # Touch the bits we rely on so a half-broken install fails the probe.
-        _ = _pl.lib.fstReaderOpen
-        _ = _pl.fstReaderIterBlocks2
-        _PYLIBFST = _pl
-    except Exception:
-        _PYLIBFST = None
-    return _PYLIBFST
-
-
-def _force_native():
-    """True if the user pinned the native reader via env var."""
-    val = os.environ.get('OWA_FST_FORCE_NATIVE', '')
-    return val.strip().lower() not in ('', '0', 'false', 'no', 'off')
-
-
-def pylibfst_available():
-    """Public: is the pylibfst backend usable right now (and not force-disabled)?"""
-    return (not _force_native()) and (_probe_pylibfst() is not None)
-
-
-_PYLIBFST_REAL_TYPES = frozenset({
-    int(FstVarType.VCD_REAL), int(FstVarType.VCD_REAL_PARAMETER),
-    int(FstVarType.VCD_REALTIME), int(FstVarType.SV_SHORTREAL),
-})
-
-
-class PyLibFstParser:
-    """FST parser backed by pylibfst (GTKWave fstapi).
-
-    Exposes the exact same public surface as FSTParser — attributes
-    (signals, ts_sec, ts_str, date, version, comments, raw_var_count,
-    raw_type_counts) and methods (match, iter_events, scan_time_range,
-    _format_raw_value) — and yields identical (time, handle, value) events, so
-    the CLI cannot tell which backend produced a result.
-    """
-
-    # Reuse the native adapter's matching and value formatting verbatim so the
-    # two backends can never drift on filter semantics or value rendering.
-    match = FSTParser.match
-
-    def __init__(self, path):
-        pl = _probe_pylibfst()
-        if pl is None:
-            raise _FstFormatError('pylibfst not available')
-        self._pl = pl
-        self._ffi = pl.ffi
-        self._lib = pl.lib
-        self.path = path
-        ctx = pl.lib.fstReaderOpen(str(path).encode('utf-8'))
-        if ctx == pl.ffi.NULL:
-            raise _FstFormatError('pylibfst could not open {}'.format(path))
-        self._ctx = ctx
-
-        lib = self._lib
-        ts = lib.fstReaderGetTimescale(ctx)  # power-of-ten exponent, like native
-        self.ts_sec = 10 ** ts
-        ts_unit = 's'
-        for u, scale in sorted(_UNITS.items(), key=lambda x: -x[1]):
-            if abs(self.ts_sec - scale) < 1e-12:
-                ts_unit = u
-                break
-        self.ts_str = '$timescale 1{} $end'.format(ts_unit)
-        self.date = pl.string(lib.fstReaderGetDateString(ctx))
-        self.version = pl.string(lib.fstReaderGetVersionString(ctx))
-        # FST does not carry a VCD-style $comment list; native reports [] too.
-        self.comments = []
-        self._start_time = lib.fstReaderGetStartTime(ctx)
-        self._end_time = lib.fstReaderGetEndTime(ctx)
-        # Endianness for real (double) decoding, mirroring the native reader's
-        # header.double_endian_match handling.
-        self._double_le = True
-        try:
-            self._double_le = bool(lib.fstReaderGetDoubleEndianMatchState(ctx))
-        except Exception:
-            self._double_le = True
-
-        self.signals = {}
-        self.raw_var_count = 0
-        self.raw_type_counts = defaultdict(int)
-        self._handle_type = {}
-
-        ffi = self._ffi
-        lib.fstReaderIterateHierRewind(ctx)
-        scope = []
-        while True:
-            h = lib.fstReaderIterateHier(ctx)
-            if h == ffi.NULL:
-                break
-            htyp = h.htyp
-            if htyp == lib.FST_HT_SCOPE:
-                scope.append(pl.string(h.u.scope.name))
-            elif htyp == lib.FST_HT_UPSCOPE:
-                if scope:
-                    scope.pop()
-            elif htyp == lib.FST_HT_VAR:
-                var = h.u.var
-                handle = var.handle
-                var_type = var.typ
-                length = var.length
-                name = pl.string(var.name)
-                base = '.'.join(scope)
-                path_full = (base + '.' + name) if base else name
-                # Normalize "name [msb:lsb]" -> "name[msb:lsb]" exactly as the
-                # native adapter does (fstapi emits a space before the bracket).
-                bracket_pos = path_full.find(' [')
-                if bracket_pos >= 0:
-                    path_full = path_full[:bracket_pos] + path_full[bracket_pos + 1:]
-
-                self.raw_var_count += 1
-                vtype_name = _FST_VAR_TYPE_NAMES.get(var_type, 'wire')
-                self.raw_type_counts[vtype_name] += 1
-                is_real = var_type in _PYLIBFST_REAL_TYPES
-                vtype = 'real' if is_real else vtype_name
-                if var_type == int(FstVarType.VCD_REALTIME):
-                    vtype = 'realtime'
-
-                scope_str = ''
-                dot_pos = path_full.rfind('.')
-                if dot_pos >= 0:
-                    scope_str = path_full[:dot_pos]
-
-                self._handle_type[handle] = var_type
-                existing = self.signals.get(handle)
-                if existing is not None:
-                    existing['aliases'].append(path_full)
-                    if scope_str and scope_str not in existing['scopes']:
-                        existing['scopes'].append(scope_str)
-                else:
-                    width = length if not is_real else 64
-                    if var_type == int(FstVarType.VCD_EVENT):
-                        width = 1
-                    self.signals[handle] = {
-                        'path': path_full, 'width': width, 'type': vtype,
-                        'aliases': [path_full], 'scope': scope_str,
-                        'scopes': [scope_str] if scope_str else [],
-                    }
-
-    def scan_time_range(self):
-        return self._start_time, self._end_time
-
-    def _format_raw_value(self, handle, raw_val):
-        """Identical contract to FSTParser._format_raw_value."""
-        if isinstance(raw_val, memoryview):
-            raw_val = bytes(raw_val)
-        var_type = self._handle_type.get(handle, -1)
-        info = self.signals[handle]
-        if var_type in _PYLIBFST_REAL_TYPES and len(raw_val) >= 8:
-            try:
-                fmt = '<d' if self._double_le else '>d'
-                dval = struct.unpack(fmt, raw_val[:8])[0]
-                return '{:.16g}'.format(dval)
-            except Exception:
-                return raw_val.decode('utf-8', errors='replace')
-        elif info.get('type') == 'string' or info['width'] == 0:
-            return raw_val.decode('utf-8', errors='replace')
-        elif info['width'] == 1:
-            val_str = raw_val.decode('ascii', errors='replace')
-            return val_str if val_str in '01xz' else 'x'
-        else:
-            val_str = raw_val.decode('ascii', errors='replace')
-            if not all(c in '01xz' for c in val_str):
-                val_str = ''.join(c if c in '01xz' else 'x' for c in val_str)
-            return val_str
-
-    def iter_events(self, t0=0, t1=None, sids=None, *, bulk_parse=True):
-        lib = self._lib
-        ffi = self._ffi
-        ctx = self._ctx
-
-        # C-level signal filter: ask fstapi to skip unselected handles entirely.
-        lib.fstReaderClrFacProcessMaskAll(ctx)
-        if sids is None:
-            lib.fstReaderSetFacProcessMaskAll(ctx)
-        else:
-            # Restrict to declared handles to match the native filtered path.
-            any_valid = False
-            for h in sids:
-                if h in self.signals:
-                    lib.fstReaderSetFacProcessMask(ctx, h)
-                    any_valid = True
-            if not any_valid:
-                return
-
-        # C-level time window when an upper bound is given.  fstapi's range is
-        # inclusive on both ends; we still re-check t0/t1 below so semantics are
-        # exactly the native reader's.
-        if t1 is not None:
-            lib.fstReaderSetLimitTimeRange(ctx, int(t0) if t0 else 0, int(t1))
-        else:
-            lib.fstReaderSetUnlimitedTimeRange(ctx)
-
-        events = []
-        ap = events.append
-        # Logic values arrive as ascii bit-strings; variable-length (string /
-        # real) values arrive via the varlen callback as raw bytes.
-        def _vc(_user, time, facidx, value):
-            ap((time, facidx, self._ffi.string(value)))
-
-        def _vc_varlen(_user, time, facidx, value, length):
-            ap((time, facidx, self._ffi.buffer(value, length)[:]))
-
-        self._pl.fstReaderIterBlocks2(ctx, _vc, _vc_varlen, None, None)
-
-        fmt = self._format_raw_value
-        for time, facidx, raw in events:
-            if time < t0:
-                continue
-            if t1 is not None and time > t1:
-                continue
-            if facidx not in self.signals:
-                continue
-            yield (time, facidx, fmt(facidx, raw))
-
-
 def wave_parser(path):
     path_lower = str(path).lower()
-    is_fst = path_lower.endswith('.fst')
-    if not is_fst and not path_lower.endswith('.vcd'):
-        # Sniff the magic byte for extensionless inputs.
-        try:
-            with open(path, 'rb') as f:
-                if f.read(1) == _FST_MAGIC:
-                    is_fst = True
-        except Exception:
-            pass
-
-    if is_fst:
-        # Prefer pylibfst when present (and not force-disabled); fall back to the
-        # native reader on any failure so a quirky build never breaks the tool.
-        if pylibfst_available():
-            try:
-                return PyLibFstParser(path)
-            except Exception:
-                pass
+    if path_lower.endswith('.fst'):
         try:
             return FSTParser(path)
         except _FstFormatError as e:
             sys.exit('Error: invalid FST file: {}'.format(e))
         except Exception as e:
             sys.exit('Error: cannot open FST file: {}'.format(e))
-
+    if path_lower.endswith('.vcd'):
+        return VCDParser(path)
+    try:
+        with open(path, 'rb') as f:
+            if f.read(1) == _FST_MAGIC:
+                return FSTParser(path)
+    except Exception:
+        pass
     return VCDParser(path)# ================================================================
 # Part 8: Commands + CLI
 # ================================================================
@@ -6518,58 +6270,10 @@ def _add_common(sp):
                     help='show extra fields; if --limit is omitted, disables truncation')
 
 
-def _dependency_status_banner():
-    """Build the optional-dependency status shown ONLY in --help.
-
-    Reports whether the optional accelerators (pylibfst, numpy) are installed.
-    When one is missing, prominently warns that the tool falls back to a slower
-    path and gives the exact pip command to install it.  Returns '' when both
-    are present (nothing to nag about).
-    """
-    lines = []
-
-    pylibfst_ok = _probe_pylibfst() is not None
-    numpy_ok = _np is not None
-    forced_native = _force_native()
-
-    if pylibfst_ok and numpy_ok and not forced_native:
-        return ''  # fully accelerated; stay quiet
-
-    lines.append('optional acceleration:')
-
-    if pylibfst_ok:
-        if forced_native:
-            lines.append('  [native forced] pylibfst is installed but disabled '
-                         'by OWA_FST_FORCE_NATIVE; using the pure-Python FST reader.')
-        else:
-            lines.append('  [ok]   pylibfst  : FST reads use the fast GTKWave backend')
-    else:
-        lines.append('  [SLOW] pylibfst  : NOT installed - FST reads fall back to the')
-        lines.append('                     pure-Python reader, which is much slower on')
-        lines.append('                     large traces. Install it for a big speedup:')
-        lines.append('                         pip install pylibfst')
-
-    if numpy_ok:
-        lines.append('  [ok]   numpy     : FST time-table decode is vectorized')
-    else:
-        lines.append('  [SLOW] numpy     : NOT installed - FST time-table decode falls')
-        lines.append('                     back to pure Python (slower on large traces).')
-        lines.append('                     Install it for a speedup:')
-        lines.append('                         pip install numpy')
-
-    return '\n'.join(lines)
-
-
-def _help_epilog():
-    banner = _dependency_status_banner()
-    return banner if banner else None
-
-
 def main():
     p = argparse.ArgumentParser(
         prog='open_wave_analyzer',
         description=__doc__,
-        epilog=_help_epilog(),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--json', action='store_true',
                    help='output compact structured JSON instead of text')

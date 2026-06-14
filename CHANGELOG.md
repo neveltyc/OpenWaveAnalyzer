@@ -3,41 +3,6 @@
 All notable changes to open_wave_analyzer.
 
 
-## [3.1.0] - 2026-05-29
-
-### Added
-
-- Optional pylibfst backend for FST files. pylibfst is a cffi binding over
-  GTKWave's reference fstapi (the same C reader behind fst2vcd). When it is
-  installed it becomes the default FST reader; otherwise the built-in
-  pure-Python reader is used. The tool remains a single file with no required
-  dependencies — pylibfst is a pure accelerator.
-  - Measured speedups via the CLI on a 386 MB VCS trace (warm cache): filtered
-    busy-signal dump 14.2s -> 5.1s; point-query snapshot 4.4s -> 2.0s, with
-    substantially lower peak memory. Raw reader speedups are larger
-    (filtered/point/range queries are 20x-1000x faster at the reader level);
-    CLI formatting caps the end-to-end gain.
-  - Output is byte-for-byte identical to the native reader. A new
-    backend-equivalence test suite (verify/test_pylibfst_backend.py) runs every
-    command on every FST fixture under both backends and asserts identical
-    stdout; it is skipped automatically when pylibfst is not installed.
-- `OWA_FST_FORCE_NATIVE` environment variable forces the pure-Python FST reader
-  regardless of pylibfst, for testing and A/B comparison. If selecting or
-  opening via pylibfst fails for any reason, the tool transparently falls back
-  to the native reader rather than erroring.
-- `--help` now reports optional-acceleration status. When pylibfst or numpy is
-  missing it prominently warns that FST handling falls back to a slower path
-  and prints the exact `pip install` command. This notice appears only in
-  `--help`, never in normal command output.
-
-### Notes
-
-- numpy remains an optional accelerator for the native reader's time-table
-  decode (unchanged from 3.0.x); its presence is now also reported in `--help`.
-- The native reader stays fully supported as the zero-dependency default and as
-  the correctness reference the pylibfst path is validated against.
-
-
 ## [3.0.1] - 2026-05-29
 
 ### Fixed

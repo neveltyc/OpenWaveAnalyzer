@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.1.0-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.0.1-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -72,25 +72,6 @@ python open_wave_analyzer.py --version
 
 No pip, no venv, no PyPI.  Works anywhere curl and Python 3.9+ are available
 &mdash; CI containers, EDA servers, Docker builds, agent toolchains.
-
-### Optional acceleration (FST)
-
-The tool runs fully on the standard library alone.  Two optional packages, if
-present, make FST handling much faster &mdash; they are never required and the
-single-file artifact is unchanged:
-
-```bash
-pip install pylibfst   # GTKWave fstapi backend: large speedup on FST reads
-pip install numpy      # vectorized FST time-table decode
-```
-
-When `pylibfst` is installed it becomes the default FST reader (the same
-GTKWave `fstapi` behind `fst2vcd`); otherwise the built-in pure-Python reader
-is used.  Output is byte-for-byte identical either way.  Set
-`OWA_FST_FORCE_NATIVE=1` to pin the pure-Python reader (used for testing and
-comparison).  `python open_wave_analyzer.py --help` reports whether each
-accelerator is active and prints the install command if one is missing.
-
 
 ## Supported formats
 
